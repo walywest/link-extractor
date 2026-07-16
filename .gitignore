@@ -5,6 +5,12 @@ __pycache__/
 .venv/
 venv/
 
+# devenv / direnv (NixOS dev shell)
+.devenv/
+.devenv.flake.nix
+devenv.lock
+.direnv/
+
 # PyInstaller build output
 build/
 dist/

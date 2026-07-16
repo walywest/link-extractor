@@ -1,0 +1,4 @@
+# devenv inputs — https://devenv.sh/reference/yaml-options/
+inputs:
+  nixpkgs:
+    url: github:cachix/devenv-nixpkgs/rolling

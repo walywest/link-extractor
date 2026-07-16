@@ -8,6 +8,7 @@ install if the bundled binary is somehow missing.
 from __future__ import annotations
 import os
 import re
+import shutil
 import subprocess
 import threading
 from pathlib import Path
@@ -38,12 +39,24 @@ class ExtractError(Exception):
 
 
 def find_unrar() -> Path | None:
-    if BUNDLED_UNRAR.exists():
+    # Windows: prefer the vendored UnRAR.exe shipped with the app.
+    if os.name == "nt" and BUNDLED_UNRAR.exists():
         return BUNDLED_UNRAR
+    # Any platform: a RAR extractor on PATH. `unrar`/`rar` take UnRAR-style
+    # args; `unar` (The Unarchiver, free, handles RAR5 + multi-volume) is the
+    # Nix/Linux-friendly fallback and is invoked with its own flags below.
+    for exe in ("unrar", "rar", "unar"):
+        found = shutil.which(exe)
+        if found:
+            return Path(found)
+    # Windows WinRAR install locations.
     for c in _SYSTEM_CANDIDATES:
         p = Path(c)
         if p.exists():
             return p
+    # Last resort on Windows: the vendored binary even if it wasn't first.
+    if os.name == "nt" and BUNDLED_UNRAR.exists():
+        return BUNDLED_UNRAR
     return None
 
 
@@ -85,9 +98,15 @@ def extract_archive(
     dest_dir = Path(dest_dir)
     dest_dir.mkdir(parents=True, exist_ok=True)
 
-    # x = extract with full paths, -o+ = overwrite, -y = assume yes,
-    # trailing backslash on dest tells UnRAR it's a directory.
-    args = [str(unrar), "x", "-o+", "-y", str(archive), str(dest_dir) + os.sep]
+    if "unar" in unrar.name.lower():
+        # The Unarchiver: -f overwrite, -o output dir, -q quiet. It auto-joins
+        # sibling volumes when pointed at the first .partNN. No percentage stream.
+        args = [str(unrar), "-force-overwrite", "-quiet",
+                "-output-directory", str(dest_dir), str(archive)]
+    else:
+        # UnRAR/RAR: x = extract with full paths, -o+ = overwrite, -y = assume
+        # yes, trailing separator on dest tells it the target is a directory.
+        args = [str(unrar), "x", "-o+", "-y", str(archive), str(dest_dir) + os.sep]
     creation = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
     proc = subprocess.Popen(
         args,
