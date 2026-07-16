@@ -228,11 +228,13 @@ class App:
         try:
             result = scrape_fitgirl_page(url)
         except ScrapeError as e:
-            self._schedule_ui(lambda: self._fetch_done(None, None, str(e), ""))
+            err = str(e)
+            self._schedule_ui(lambda: self._fetch_done(None, None, err, ""))
             return
         except Exception as e:
             tb = log_exception("fetching FitGirl page", e)
-            self._schedule_ui(lambda: self._fetch_done(None, None, str(e), tb))
+            err = str(e)
+            self._schedule_ui(lambda: self._fetch_done(None, None, err, tb))
             return
         # Prefer the clean game name from filenames, fall back to page title.
         subfolder = game_title_from_links(result.links) or result.title or ""

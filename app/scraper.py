@@ -56,6 +56,76 @@ def _clean_title(raw: str) -> str | None:
     return t or None
 
 
+def _collect_links(page, links: list[str], seen: set[str]) -> None:
+    """Append any new FuckingFast anchors on ``page`` into ``links`` (deduped)."""
+    hrefs = page.eval_on_selector_all(
+        "a[href*='fuckingfast']",
+        "els => els.map(e => e.href)",
+    )
+    for h in hrefs:
+        m = FF_HREF_RE.match(h)
+        if not m:
+            continue
+        clean = h if "#" in h else m.group(0)
+        key = clean.split("#", 1)[0]
+        if key in seen:
+            continue
+        seen.add(key)
+        links.append(clean)
+
+
+def _scrape_once(page_url: str, timeout_ms: int) -> tuple[list[str], str | None]:
+    """One browser session. Returns whatever links/title it captured.
+
+    Grabs the links the instant the page's DOM is ready — before any extra
+    waits or clicks — so an intermittent post-load browser crash (common with
+    these ad-heavy pages in headless mode) can't discard data we already have.
+    A crash after we've collected the links is swallowed; the caller decides
+    whether an empty result is worth retrying.
+    """
+    links: list[str] = []
+    seen: set[str] = set()
+    title: str | None = None
+    try:
+        with Camoufox(headless=True, humanize=False, geoip=False) as browser:
+            page = browser.new_page()
+            page.goto(page_url, wait_until="domcontentloaded", timeout=timeout_ms)
+
+            # Primary grab: the part links are static anchors present on load.
+            _collect_links(page, links, seen)
+
+            # Game title from the H1 (falls back to <title>).
+            try:
+                title = _clean_title(
+                    page.eval_on_selector("h1.entry-title", "e => e.textContent")
+                )
+            except Exception:
+                title = None
+            if not title:
+                try:
+                    title = _clean_title(page.title())
+                except Exception:
+                    title = None
+
+            # Best-effort: expand collapsible spoiler sections in case a repack
+            # hides extra archive sets, then re-collect. Never fatal — we already
+            # have the primary links, and clicking can destabilise the browser.
+            try:
+                page.eval_on_selector_all(
+                    ".su-spoiler-title, .su-spoiler",
+                    "els => els.forEach(e => { try { e.click(); } catch (_) {} })",
+                )
+                page.wait_for_timeout(500)
+                _collect_links(page, links, seen)
+            except Exception:
+                pass
+    except Exception:
+        # A late browser/driver crash is only a problem if we got nothing.
+        if not links:
+            raise
+    return links, title
+
+
 def scrape_fitgirl_page(page_url: str, timeout_ms: int = 60_000) -> ScrapeResult:
     """Return the sorted, de-duplicated FuckingFast links on a FitGirl repack
     post plus the parsed game title. Raises ScrapeError on failure."""
@@ -65,55 +135,20 @@ def scrape_fitgirl_page(page_url: str, timeout_ms: int = 60_000) -> ScrapeResult
 
     links: list[str] = []
     title: str | None = None
-    try:
-        with Camoufox(headless=True, humanize=False, geoip=False) as browser:
-            page = browser.new_page()
-            page.goto(page_url, wait_until="domcontentloaded", timeout=timeout_ms)
-            page.wait_for_timeout(2500)
-
-            # Expand collapsible spoiler sections if present (links usually live
-            # in the DOM regardless, but this is cheap insurance).
-            try:
-                page.eval_on_selector_all(
-                    ".su-spoiler-title, .su-spoiler",
-                    "els => els.forEach(e => { try { e.click(); } catch (_) {} })",
-                )
-                page.wait_for_timeout(500)
-            except Exception:
-                pass
-
-            # Game title from the H1 (falls back to <title>)
-            try:
-                h1 = page.eval_on_selector(
-                    "h1.entry-title", "e => e.textContent"
-                )
-                title = _clean_title(h1)
-            except Exception:
-                title = None
-            if not title:
-                title = _clean_title(page.title())
-
-            hrefs = page.eval_on_selector_all(
-                "a[href*='fuckingfast']",
-                "els => els.map(e => e.href)",
-            )
-            seen: set[str] = set()
-            for h in hrefs:
-                m = FF_HREF_RE.match(h)
-                if not m:
-                    continue
-                clean = h if "#" in h else m.group(0)
-                key = clean.split("#", 1)[0]
-                if key in seen:
-                    continue
-                seen.add(key)
-                links.append(clean)
-    except ScrapeError:
-        raise
-    except Exception as e:
-        raise ScrapeError(f"Failed to load page: {e}") from e
+    last_err: Exception | None = None
+    # Retry once: the browser can crash before we capture anything.
+    for _attempt in range(2):
+        try:
+            links, title = _scrape_once(page_url, timeout_ms)
+        except Exception as e:
+            last_err = e
+            continue
+        if links:
+            break
 
     if not links:
+        if last_err is not None:
+            raise ScrapeError(f"Failed to load page: {last_err}") from last_err
         raise ScrapeError(
             "No FuckingFast links found on that page. Make sure it's a game "
             "repack page (not the homepage or an 'upcoming' post)."
