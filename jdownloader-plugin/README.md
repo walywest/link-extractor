@@ -88,9 +88,12 @@ releases, so treat these as a starting point:
 1. Locate your JDownloader install's plugin-loading/dev folder (varies by
    version/platform — check JDownloader's own docs/forum for your release;
    search for how JD loads third-party/local `.java` plugins).
-2. Copy `src/jd/plugins/decrypter/FuckingFastCoStealth.java` there, preserving
-   the `jd/plugins/decrypter/` package path.
-3. Start `resolver_daemon.py` (above) first.
+2. Edit `REPO_ROOT` near the top of `FuckingFastCoStealth.java` to your actual
+   FitFast-Downloader checkout path, then copy the file there, preserving the
+   `jd/plugins/decrypter/` package path.
+3. Either start `resolver_daemon.py` (above) yourself, or just skip this —
+   the plugin will auto-launch it on first use if `/health` isn't already
+   answering (see "Known gaps" below for what that depends on).
 4. Paste a fuckingfast.co link into JDownloader's LinkGrabber. It should hit
    the plugin, which calls the daemon and hands JD the resolved signed URL.
 
@@ -104,17 +107,30 @@ decrypter plugin shipped with your install and match its signatures.
 
 ## Known gaps / next steps
 
-- **Not compiled or run against a real JDownloader.** The single highest-value
-  next step is opening it in an actual JDownloader dev setup and fixing
-  whatever the real compiler complains about.
-- **JSON parsing is a regex, not a real parser.** Fine for the two fixed
-  string fields the daemon returns; if you extend the response shape, switch
-  to JDownloader's bundled `org.appwork.storage.JSonStorage` (available once
+- **Not compiled or run against a real JDownloader.** Still the single
+  highest-value next step — this environment has no `javac`/JD jar to
+  compile against, so the Java has only been checked by hand (brace/paren
+  balance) and by matching a real shipped decrypter's shape. Open it in an
+  actual JDownloader dev setup and fix whatever the real compiler complains
+  about.
+- **The daemon now auto-launches.** `decryptIt()` calls `ensureDaemonRunning()`
+  first: a quick `/health` check, and if that fails, a guarded (single-launch)
+  `ProcessBuilder` spawn of `resolver_daemon.py`, then polling `/health` for
+  up to 30s (Camoufox's first request is a real browser cold-start, so this
+  needs more headroom than a normal HTTP call). **You must edit `REPO_ROOT`**
+  in `FuckingFastCoStealth.java` to point at your actual checkout path before
+  this works — it can't be discovered at runtime from inside a single `.java`
+  file with no build metadata. Daemon stdout/stderr goes to
+  `jdownloader-plugin/resolver_daemon.log`. You can still start the daemon
+  by hand first (as before) — auto-launch only kicks in when `/health`
+  already fails.
+- **JSON parsing is still regex, not a real parser** — but the regexes now
+  match escaped-string content (`(?:\\.|[^"\\])*`) and a `jsonUnescape()`
+  helper undoes `\"`, `\\`, `\/`, `\n`, `\r`, `\t`, `\b`, `\f`, and `\uXXXX`,
+  so filenames with quotes/backslashes/unicode no longer break parsing. If
+  you extend the response shape beyond these fixed fields, switch to
+  JDownloader's bundled `org.appwork.storage.JSonStorage` (available once
   you're compiling against the real jar) instead of adding more regexes.
-- **The daemon must be started manually.** A nicer integration would have the
-  plugin lazily launch it (check `/health`, spawn via `ProcessBuilder` if
-  down, track the child process). Left out here to keep the spike's moving
-  parts to a minimum.
 - **No captcha/edge-case handling in Java.** Anything Camoufox's resolve step
   hits (captcha, dead link, layout change) surfaces as a plain error string
   from the daemon; the plugin reports it via `DecrypterException` rather than
