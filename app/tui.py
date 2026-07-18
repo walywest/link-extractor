@@ -519,22 +519,19 @@ class FitFastTUI(App):
         if not self.running:
             return
         self.shutdown_event.set()
-        if self.downloader is not None:
-            try:
-                self.downloader.pause_all()
-            except Exception:
-                pass
-            with self.jobs_lock:
-                for job in self.jobs:
-                    if job.gid:
-                        try:
-                            self.downloader.remove(job.gid)
-                        except Exception:
-                            pass
-        done = sum(1 for j in self.jobs if j.state == "done")
-        err = sum(1 for j in self.jobs if j.state == "error")
         self.running = False
         self._set_controls(running=False)
+        # Must actually stop the old aria2c process and close the old
+        # Camoufox browser (not just null out our reference) — otherwise
+        # each Cancel-then-Start cycle leaks another aria2c + browser pair
+        # that keeps running in the background forever.
+        if self.resolver is not None:
+            threading.Thread(target=self.resolver.close, daemon=True).start()
+            self.resolver = None
+        d = self.downloader
+        if d is not None:
+            threading.Thread(target=d.stop, daemon=True).start()
+            self.downloader = None
         self._log("Cancelled. Partial files kept — paste the same links to resume.")
 
     def _set_controls(self, running: bool) -> None:
