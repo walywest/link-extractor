@@ -51,30 +51,6 @@ class Aria2RpcError(Exception):
     pass
 
 
-def remote_content_length(url: str) -> int | None:
-    """HEAD the signed URL to learn its size, so a local file can be checked
-    against it before deciding whether to skip or resume."""
-    try:
-        r = requests.head(
-            url, allow_redirects=True, timeout=15,
-            headers={"User-Agent": DOWNLOAD_UA, "Referer": "https://fuckingfast.co/"},
-        )
-        length = r.headers.get("Content-Length")
-        return int(length) if length is not None else None
-    except Exception:
-        return None
-
-
-def local_file_complete(path: Path, expected_size: int | None) -> bool:
-    """True if a file already on disk at `path` is already fully downloaded."""
-    if expected_size is None or expected_size <= 0:
-        return False
-    try:
-        return path.stat().st_size >= expected_size
-    except OSError:
-        return False
-
-
 def _find_free_port() -> int:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         s.bind(("127.0.0.1", 0))
