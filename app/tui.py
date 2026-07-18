@@ -55,7 +55,7 @@ else:
 
 class Job:
     __slots__ = ("url", "filename", "state", "gid", "error",
-                 "total", "completed", "speed")
+                 "total", "completed", "speed", "retry_count", "next_retry_at")
 
     def __init__(self, url: str, filename: str):
         self.url = url
@@ -66,11 +66,18 @@ class Job:
         self.total = 0
         self.completed = 0
         self.speed = 0
+        self.retry_count = 0
+        self.next_retry_at = 0.0
 
 
 class FitFastTUI(App):
     TITLE = "FitFast Downloader"
     SUB_TITLE = "FitGirl / FuckingFast · terminal edition"
+
+    # Failed jobs are re-queued automatically with backoff, forever, until
+    # they succeed — never left behind for the user to retry by hand.
+    RETRY_BASE_DELAY_S = 5.0
+    RETRY_MAX_DELAY_S = 60.0
 
     CSS = """
     Screen { layout: vertical; }
@@ -327,9 +334,7 @@ class FitFastTUI(App):
             try:
                 signed_url, filename = self.resolver.resolve(job.url)
             except Exception as e:
-                job.state = "error"
-                job.error = str(e)
-                self.call_from_thread(self._set_status, job, "Resolve error")
+                self._fail_job(job, "Resolve error", str(e))
                 continue
             job.filename = filename
             self.call_from_thread(self._rename_row, job)
@@ -348,12 +353,40 @@ class FitFastTUI(App):
             try:
                 job.gid = self.downloader.add(signed_url, str(self.dest_folder), filename)
             except Exception as e:
-                job.state = "error"
-                job.error = str(e)
-                self.call_from_thread(self._set_status, job, "aria2 error")
+                self._fail_job(job, "aria2 error", str(e))
                 continue
             job.state = "downloading"
             self.call_from_thread(self._set_status, job, "Starting…")
+
+    def _mark_failed(self, job: Job, error: str) -> float:
+        """Record a failure and compute its retry backoff. Pure state, no UI —
+        safe to call from the resolver thread or the (main-thread) poll loop."""
+        job.error = error
+        job.retry_count += 1
+        delay = min(
+            self.RETRY_BASE_DELAY_S * (2 ** (job.retry_count - 1)),
+            self.RETRY_MAX_DELAY_S,
+        )
+        job.next_retry_at = time.time() + delay
+        job.state = "error"
+        return delay
+
+    def _fail_job(self, job: Job, status_text: str, error: str) -> None:
+        """Resolver-thread failure path: mark failed, then hop to the main
+        thread to update the row."""
+        delay = self._mark_failed(job, error)
+        self.call_from_thread(
+            self._set_status, job, f"{status_text} — retrying in {delay:.0f}s"
+        )
+
+    def _requeue_failed_job(self, job: Job) -> None:
+        """Its backoff has elapsed — send it back through resolve+download.
+        Called from the (main-thread) poll loop, so it updates the row directly."""
+        job.gid = None
+        job.error = None
+        job.state = "queued"
+        self._set_status(job, f"Retrying (attempt {job.retry_count + 1})…")
+        self.resolve_queue.put(job)
 
     def _rename_row(self, job: Job) -> None:
         table = self.query_one("#jobs", DataTable)
@@ -384,10 +417,16 @@ class FitFastTUI(App):
         agg_speed = 0
         done = err = 0
         total_c = total_s = 0
+        now = time.time()
         for job in jobs:
-            if job.state in ("done", "error"):
-                done += job.state == "done"
-                err += job.state == "error"
+            if job.state == "done":
+                done += 1
+                continue
+            if job.state == "error":
+                if now >= job.next_retry_at:
+                    self._requeue_failed_job(job)
+                else:
+                    err += 1
                 continue
             if job.gid is None:
                 continue
@@ -421,9 +460,8 @@ class FitFastTUI(App):
                     table.update_cell(rid, "pct", "100%")
                     table.update_cell(rid, "eta", "")
                 elif status == "error":
-                    job.state = "error"
-                    job.error = st.get("errorMessage") or "aria2 error"
-                    table.update_cell(rid, "status", "Error")
+                    delay = self._mark_failed(job, st.get("errorMessage") or "aria2 error")
+                    table.update_cell(rid, "status", f"Error — retrying in {delay:.0f}s")
                 elif status == "paused":
                     table.update_cell(rid, "status", "Paused")
                 elif status == "waiting":
@@ -433,12 +471,15 @@ class FitFastTUI(App):
 
         self.sub_title = (
             f"{done}/{len(jobs)} done"
-            + (f" · {err} failed" if err else "")
+            + (f" · {err} retrying" if err else "")
             + f" · {format_bytes(total_c)}/{format_bytes(total_s)}"
             + f" · {format_speed(agg_speed)}"
         )
+        # Failed jobs get re-queued above rather than ever counting as
+        # finished, so only stop once nothing is active AND nothing is stuck
+        # waiting out its retry backoff.
         active = len(jobs) - done - err
-        if active == 0 and self.running:
+        if active == 0 and err == 0 and self.running:
             self._all_finished(done, err)
 
     def _all_finished(self, done: int, err: int) -> None:

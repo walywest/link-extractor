@@ -44,7 +44,7 @@ else:
 class Job:
     __slots__ = ("url", "guess_name", "state", "filename", "signed_url", "gid",
                  "error", "total", "completed", "speed", "reresolve_count",
-                 "download_started_at")
+                 "download_started_at", "retry_count", "next_retry_at")
 
     def __init__(self, url: str, guess_name: str):
         self.url = url
@@ -59,6 +59,8 @@ class Job:
         self.speed: int = 0
         self.reresolve_count: int = 0
         self.download_started_at: float = 0.0
+        self.retry_count: int = 0
+        self.next_retry_at: float = 0.0
 
 
 class StallMonitor:
@@ -131,6 +133,10 @@ class StallMonitor:
 
 class App:
     POLL_INTERVAL_MS = 500
+    # Failed jobs are re-queued automatically with backoff, forever, until
+    # they succeed — never left behind for the user to retry by hand.
+    RETRY_BASE_DELAY_S = 5.0
+    RETRY_MAX_DELAY_S = 60.0
 
     def __init__(self) -> None:
         self.config = config_mod.load()
@@ -415,7 +421,7 @@ class App:
             try:
                 signed_url, filename = self.resolver.resolve(job.url)
             except (ResolveError, Exception) as e:
-                self._set_state(job, "error", f"Error: {e}", error=str(e))
+                self._fail_job(job, f"Error: {e}", error=str(e))
                 continue
 
             job.signed_url = signed_url
@@ -441,7 +447,7 @@ class App:
             try:
                 gid = self.downloader.add(signed_url, str(self.dest_folder), target_filename)
             except Exception as e:
-                self._set_state(job, "error", f"aria2 add failed: {e}", error=str(e))
+                self._fail_job(job, f"aria2 add failed: {e}", error=str(e))
                 continue
             job.gid = gid
             job.download_started_at = time.time()
@@ -502,13 +508,17 @@ class App:
         with self.jobs_lock:
             jobs = list(self.jobs)
 
+        now = time.time()
         for job in jobs:
-            if job.state in ("done", "error"):
-                if job.state == "done":
-                    done_count += 1
-                    total_completed += job.total
-                    total_size += job.total
-                elif job.state == "error":
+            if job.state == "done":
+                done_count += 1
+                total_completed += job.total
+                total_size += job.total
+                continue
+            if job.state == "error":
+                if now >= job.next_retry_at:
+                    self._requeue_failed_job(job)
+                else:
                     error_count += 1
                 continue
 
@@ -560,12 +570,10 @@ class App:
                     if job.gid:
                         self.stall_monitor.forget(job.gid)
                 elif status == "error":
-                    row.set_status("Error", "#ff6b6b")
                     row.set_stats(err_msg or "aria2 reported error")
-                    job.state = "error"
-                    job.error = err_msg
                     if job.gid:
                         self.stall_monitor.forget(job.gid)
+                    self._fail_job(job, "Error", error=err_msg)
                 elif status == "paused":
                     row.set_status("Paused", "#bdbdbd")
                 elif status == "waiting":
@@ -589,7 +597,7 @@ class App:
         active = len(jobs) - done_count - error_count
         status_line = (
             f"{done_count}/{len(jobs)} done"
-            + (f", {error_count} failed" if error_count else "")
+            + (f", {error_count} retrying" if error_count else "")
             + f"  •  {format_bytes(total_completed)} of {format_bytes(total_size)}"
             + f"  •  {format_speed(agg_speed)} now"
             + f"  •  peak {format_speed(self._peak_agg_speed)}"
@@ -599,8 +607,29 @@ class App:
             status_line += f"  •  ETA {format_eta(eta)}"
         self.window.set_status_bar(status_line)
 
-        if active == 0 and self.running:
+        # Failed jobs get re-queued (see above) rather than ever counting as
+        # finished, so only stop once nothing is active AND nothing is stuck
+        # waiting out its retry backoff.
+        if active == 0 and error_count == 0 and self.running:
             self._all_finished(done_count, error_count)
+
+    def _fail_job(self, job: Job, status_text: str, error: str | None = None) -> None:
+        """Mark a job failed and schedule its automatic retry (with backoff)."""
+        job.retry_count += 1
+        delay = min(
+            self.RETRY_BASE_DELAY_S * (2 ** (job.retry_count - 1)),
+            self.RETRY_MAX_DELAY_S,
+        )
+        job.next_retry_at = time.time() + delay
+        self._set_state(job, "error", f"{status_text} — retrying in {delay:.0f}s", error=error)
+
+    def _requeue_failed_job(self, job: Job) -> None:
+        """Its backoff has elapsed — send it back through resolve+download."""
+        job.gid = None
+        job.signed_url = None
+        job.error = None
+        self._set_state(job, "queued", f"Retrying (attempt {job.retry_count + 1})...")
+        self.resolve_queue.put(job)
 
     def _trigger_reresolve(self, job: Job, avg_bps: float) -> None:
         """Kill an underperforming download and re-queue it for a fresh signed URL."""
