@@ -13,10 +13,7 @@ from tkinter import messagebox
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
     from app import config as config_mod
-    from app.downloader import (
-        Downloader, Aria2NotFound, Aria2RpcError,
-        remote_content_length, local_file_complete,
-    )
+    from app.downloader import Downloader, Aria2NotFound, Aria2RpcError
     from app.resolver import (
         Resolver, ResolveError, valid_url, filename_from_fragment,
         common_folder_name, unique_folder, sanitize_filename,
@@ -27,10 +24,7 @@ if __package__ in (None, ""):
     from app.ui import MainWindow, format_bytes, format_speed, format_eta
 else:
     from . import config as config_mod
-    from .downloader import (
-        Downloader, Aria2NotFound, Aria2RpcError,
-        remote_content_length, local_file_complete,
-    )
+    from .downloader import Downloader, Aria2NotFound, Aria2RpcError
     from .resolver import (
         Resolver, ResolveError, valid_url, filename_from_fragment,
         common_folder_name, unique_folder, sanitize_filename,
@@ -434,16 +428,12 @@ class App:
                 target_filename = filename
                 self._schedule_ui(lambda j=job: self._rename_row(j))
 
-            target_path = Path(self.dest_folder) / target_filename
-            if target_path.exists():
-                expected = remote_content_length(signed_url)
-                if local_file_complete(target_path, expected):
-                    size = expected or target_path.stat().st_size
-                    job.total = size
-                    job.completed = size
-                    self._set_state(job, "done", "Already downloaded")
-                    continue
-
+            # No pre-flight HEAD check here: aria2's own --continue=true
+            # already detects an existing complete file (single plain
+            # request, no data transfer) and resumes a partial one. A
+            # separate requests.head() against the signed URL only adds an
+            # extra hit against a token that may be single-use, which is
+            # exactly what broke real downloads.
             try:
                 gid = self.downloader.add(signed_url, str(self.dest_folder), target_filename)
             except Exception as e:
