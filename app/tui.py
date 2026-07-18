@@ -5,7 +5,8 @@ Windows GUI, but through a Textual TUI so there is no Tkinter or Windows
 dependency. Paste a FitGirl page (or FuckingFast links), press Fetch, then
 Start; downloads run through aria2c and are auto-extracted with unar/unrar.
 
-Keys:  f Fetch · s Start · p Pause/Resume · c Cancel · i Install browser · q Quit
+Keys:  f Fetch · s Start · p Pause/Resume · c Cancel · i Install browser ·
+       d Remove selected link · x Clear all links · q Quit
 """
 from __future__ import annotations
 import queue
@@ -80,6 +81,8 @@ class FitFastTUI(App):
     #buttons { height: auto; padding: 1; }
     #buttons Button { margin: 0 1 0 0; }
     #opts { height: auto; padding: 0 1; }
+    #pending_label { color: $text-muted; padding: 0 1; }
+    #pending { height: 8; margin: 0 1 1 1; }
     DataTable { height: 1fr; margin: 0 1; }
     RichLog { height: 8; margin: 1 1; border: round $primary; padding: 0 1; }
     Input { margin: 0 0 1 0; }
@@ -91,6 +94,8 @@ class FitFastTUI(App):
         ("p", "pause", "Pause/Resume"),
         ("c", "cancel", "Cancel"),
         ("i", "install", "Install browser"),
+        ("d", "remove_link", "Remove link"),
+        ("x", "clear_pending", "Clear links"),
         ("q", "quit", "Quit"),
     ]
 
@@ -129,9 +134,16 @@ class FitFastTUI(App):
                            value=bool(self.config.get("delete_archives_after", False)), id="delete")
         with Horizontal(id="buttons"):
             yield Button("Fetch links", id="fetch", variant="primary")
+            yield Button("Remove selected", id="remove")
+            yield Button("Clear links", id="clear")
             yield Button("Start", id="start", variant="success")
             yield Button("Pause", id="pause", disabled=True)
             yield Button("Cancel", id="cancel", variant="error", disabled=True)
+        yield Label(
+            "Links queued to download (select a row, press d or Remove to drop it):",
+            id="pending_label",
+        )
+        yield DataTable(id="pending", zebra_stripes=True, cursor_type="row")
         yield DataTable(id="jobs", zebra_stripes=True, cursor_type="row")
         yield RichLog(id="log", highlight=False, markup=False, wrap=True)
         yield Footer()
@@ -148,6 +160,9 @@ class FitFastTUI(App):
         table.add_column("Size", key="size", width=20)
         table.add_column("Speed", key="speed", width=12)
         table.add_column("ETA", key="eta", width=9)
+        pending = self.query_one("#pending", DataTable)
+        pending.add_column("File", key="file", width=44)
+        pending.add_column("URL", key="url")
         self.set_interval(0.5, self._poll)
         self._log("Ready. Paste a FitGirl page or FuckingFast links, then Fetch / Start.")
         if not browser_ready():
@@ -174,17 +189,61 @@ class FitFastTUI(App):
     # ---- buttons / inputs -------------------------------------------------
     def on_button_pressed(self, event: Button.Pressed) -> None:
         {"fetch": self.action_fetch, "start": self.action_start,
-         "pause": self.action_pause, "cancel": self.action_cancel}.get(
+         "pause": self.action_pause, "cancel": self.action_cancel,
+         "remove": self.action_remove_link, "clear": self.action_clear_pending}.get(
             event.button.id, lambda: None)()
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
-        # Enter in the URL box fetches (or, for direct links, starts).
+        # Enter in the URL box fetches a FitGirl page, or loads direct
+        # links into the review list so they can be checked/removed first.
         if event.input.id == "url":
             url = event.value.strip()
             if is_fitgirl_url(url):
                 self.action_fetch()
             else:
-                self.action_start()
+                raw = event.value.replace(",", " ").split()
+                urls = [u for u in raw if valid_url(u)]
+                if urls:
+                    self._load_pending(urls)
+                else:
+                    self._log("Paste a FitGirl page URL, or one or more FuckingFast links.")
+
+    # ---- pending links (reviewed before Start) -----------------------------
+    def _load_pending(self, urls: list[str]) -> None:
+        self._pending_urls = list(urls)
+        self._refresh_pending_table()
+        self._log(f"Loaded {len(urls)} link(s). Review below, remove any you "
+                  "don't want, then press Start.")
+
+    def _refresh_pending_table(self) -> None:
+        table = self.query_one("#pending", DataTable)
+        table.clear()
+        for u in self._pending_urls:
+            name = filename_from_fragment(u) or "(unknown)"
+            table.add_row(name, u, key=u)
+
+    def action_remove_link(self) -> None:
+        if self.running:
+            return
+        table = self.query_one("#pending", DataTable)
+        if table.row_count == 0:
+            return
+        try:
+            row_key, _ = table.coordinate_to_cell_key(table.cursor_coordinate)
+        except Exception:
+            return
+        url = row_key.value
+        if url in self._pending_urls:
+            self._pending_urls.remove(url)
+        table.remove_row(row_key)
+        self._log(f"Removed link: {url}")
+
+    def action_clear_pending(self) -> None:
+        if self.running or not self._pending_urls:
+            return
+        self._pending_urls = []
+        self.query_one("#pending", DataTable).clear()
+        self._log("Cleared all pending links.")
 
     # ---- fetch ------------------------------------------------------------
     def action_install(self) -> None:
@@ -240,12 +299,12 @@ class FitFastTUI(App):
         self.call_from_thread(self._fetch_done, result.links, subfolder)
 
     def _fetch_done(self, links: list[str], subfolder: str) -> None:
-        self._pending_urls = list(links)
+        self._load_pending(links)
         if subfolder:
             self._suggested_subfolder = sanitize_filename(subfolder)
         self._log(f"Fetched {len(links)} link(s)"
                   + (f' for "{subfolder}".' if subfolder else ".")
-                  + " Press Start to download.")
+                  + " Review below, remove any you don't want, then press Start.")
 
     # ---- start ------------------------------------------------------------
     def action_start(self) -> None:
@@ -312,6 +371,8 @@ class FitFastTUI(App):
 
         self.running = True
         self.paused = False
+        self._pending_urls = []
+        self.query_one("#pending", DataTable).clear()
         self._set_controls(running=True)
         self._log(f"Downloading {len(self.jobs)} file(s) → {self.dest_folder}")
 
@@ -537,6 +598,8 @@ class FitFastTUI(App):
     def _set_controls(self, running: bool) -> None:
         self.query_one("#fetch", Button).disabled = running
         self.query_one("#start", Button).disabled = running
+        self.query_one("#remove", Button).disabled = running
+        self.query_one("#clear", Button).disabled = running
         self.query_one("#pause", Button).disabled = not running
         self.query_one("#cancel", Button).disabled = not running
 
