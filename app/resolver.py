@@ -78,12 +78,14 @@ def common_folder_name(filenames: list[str], fallback: str | None = None) -> str
 
 
 def unique_folder(base_dir: str | Path, name: str) -> Path:
+    """Return the destination subfolder, reusing it if it already exists.
+
+    A prior run may have left partial (or complete) files here — that's the
+    point of resuming. We never rename to "name (2)" just because the folder
+    is non-empty; per-file completeness is checked later, at download time.
+    """
     base = Path(base_dir)
     candidate = base / name
-    counter = 2
-    while candidate.exists() and any(candidate.iterdir()):
-        candidate = base / f"{name} ({counter})"
-        counter += 1
     candidate.mkdir(parents=True, exist_ok=True)
     return candidate
 
