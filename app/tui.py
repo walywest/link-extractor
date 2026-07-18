@@ -24,7 +24,10 @@ if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
     from app import config as config_mod
     from app.bootstrap import browser_ready, ensure_browser
-    from app.downloader import Downloader, Aria2NotFound, Aria2RpcError
+    from app.downloader import (
+        Downloader, Aria2NotFound, Aria2RpcError,
+        remote_content_length, local_file_complete,
+    )
     from app.resolver import (
         Resolver, valid_url, filename_from_fragment,
         common_folder_name, unique_folder, sanitize_filename,
@@ -36,7 +39,10 @@ if __package__ in (None, ""):
 else:
     from . import config as config_mod
     from .bootstrap import browser_ready, ensure_browser
-    from .downloader import Downloader, Aria2NotFound, Aria2RpcError
+    from .downloader import (
+        Downloader, Aria2NotFound, Aria2RpcError,
+        remote_content_length, local_file_complete,
+    )
     from .resolver import (
         Resolver, valid_url, filename_from_fragment,
         common_folder_name, unique_folder, sanitize_filename,
@@ -327,6 +333,18 @@ class FitFastTUI(App):
                 continue
             job.filename = filename
             self.call_from_thread(self._rename_row, job)
+
+            target_path = Path(self.dest_folder) / filename
+            if target_path.exists():
+                expected = remote_content_length(signed_url)
+                if local_file_complete(target_path, expected):
+                    size = expected or target_path.stat().st_size
+                    job.total = size
+                    job.completed = size
+                    job.state = "done"
+                    self.call_from_thread(self._mark_already_done, job)
+                    continue
+
             try:
                 job.gid = self.downloader.add(signed_url, str(self.dest_folder), filename)
             except Exception as e:
@@ -341,6 +359,18 @@ class FitFastTUI(App):
         table = self.query_one("#jobs", DataTable)
         try:
             table.update_cell(self._row_id(job), "file", job.filename)
+        except Exception:
+            pass
+
+    def _mark_already_done(self, job: Job) -> None:
+        table = self.query_one("#jobs", DataTable)
+        rid = self._row_id(job)
+        try:
+            table.update_cell(rid, "status", "Already downloaded")
+            table.update_cell(rid, "pct", "100%")
+            table.update_cell(rid, "size",
+                               f"{format_bytes(job.total)}/{format_bytes(job.total)}")
+            table.update_cell(rid, "eta", "")
         except Exception:
             pass
 
