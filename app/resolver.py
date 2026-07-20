@@ -211,10 +211,16 @@ class Resolver:
 
     @staticmethod
     def _pick_filename(url: str, title: str) -> str:
-        if title and title.strip() and title.strip().lower() not in ("fuckingfast", "fuckingfast.co"):
-            return sanitize_filename(title.strip())
+        # The URL fragment is the *per-file* name (e.g. #Game.part03.rar) that
+        # FitGirl links carry, so it wins whenever present. The page <title> is
+        # only a fallback for bare links pasted without a fragment: FuckingFast
+        # serves the SAME title for every part of a repack, so preferring it
+        # named every part identically — files collided under one name and
+        # matched none of the links that were pasted.
         frag = filename_from_fragment(url)
         if frag:
             return frag
+        if title and title.strip() and title.strip().lower() not in ("fuckingfast", "fuckingfast.co"):
+            return sanitize_filename(title.strip())
         m = re.search(r"/([a-z0-9]+)$", url.split("#", 1)[0])
         return f"{m.group(1) if m else 'download'}.bin"
