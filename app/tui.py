@@ -34,6 +34,7 @@ if __package__ in (None, ""):
     from app.extractor import extract_all, find_unrar
     from app.log import setup_logging, get_logger, log_exception
     from app.format import format_bytes, format_speed, format_eta
+    from app.state import DownloadState
 else:
     from . import config as config_mod
     from .bootstrap import browser_ready, ensure_browser
@@ -46,6 +47,7 @@ else:
     from .extractor import extract_all, find_unrar
     from .log import setup_logging, get_logger, log_exception
     from .format import format_bytes, format_speed, format_eta
+    from .state import DownloadState
 
 
 class Job:
@@ -73,6 +75,7 @@ class FitFastTUI(App):
     # they succeed — never left behind for the user to retry by hand.
     RETRY_BASE_DELAY_S = 5.0
     RETRY_MAX_DELAY_S = 60.0
+    CHECKPOINT_EVERY_S = 10.0
 
     CSS = """
     Screen { layout: vertical; }
@@ -117,6 +120,8 @@ class FitFastTUI(App):
         self._extract_thread: threading.Thread | None = None
         self._setup_thread: threading.Thread | None = None
         self._pending_urls: list[str] = []
+        self.state: DownloadState | None = None
+        self._last_checkpoint = 0.0
 
     # ---- layout -----------------------------------------------------------
     def compose(self) -> ComposeResult:
@@ -340,6 +345,48 @@ class FitFastTUI(App):
         self.config["delete_archives_after"] = self.query_one("#delete", Checkbox).value
         config_mod.save(self.config)
 
+        # Load whatever a previous run left behind for this folder, so files
+        # that already finished never touch the browser again.
+        self.state = DownloadState(self.dest_folder)
+
+        table = self.query_one("#jobs", DataTable)
+        table.clear()
+        skipped = 0
+        with self.jobs_lock:
+            self.jobs.clear()
+            for i, u in enumerate(urls):
+                cached_name = self.state.known_filename(u)
+                guess = cached_name or filename_from_fragment(u) or f"part{i+1:02d}.bin"
+                job = Job(u, guess)
+                if self.state.is_complete(u):
+                    # Verified against the manifest AND the file on disk — no
+                    # resolve, no aria2, no network at all.
+                    job.state = "done"
+                    entry = self.state.get(u) or {}
+                    job.total = job.completed = int(entry.get("total") or 0)
+                    skipped += 1
+                self.jobs.append(job)
+                table.add_row(
+                    guess,
+                    "Done (cached)" if job.state == "done" else "Queued",
+                    "100%" if job.state == "done" else "",
+                    format_bytes(job.total) if job.state == "done" and job.total else "",
+                    "", "",
+                    key=self._row_id(job),
+                )
+
+        pending_jobs = [j for j in self.jobs if j.state != "done"]
+        if skipped:
+            self._log(f"{skipped} file(s) already complete on disk — skipping resolve.")
+        if not pending_jobs:
+            # Nothing to fetch — don't spawn aria2 or the browser at all.
+            self._log("Everything was already downloaded.")
+            self.running = True          # so _all_finished tears down cleanly
+            self._pending_urls = []
+            self.query_one("#pending", DataTable).clear()
+            self._all_finished(len(self.jobs), 0)
+            return
+
         try:
             self.downloader = Downloader(
                 connections_per_file=int(self.config.get("connections_per_file", 16)),
@@ -351,21 +398,10 @@ class FitFastTUI(App):
             self.downloader = None
             return
 
-        table = self.query_one("#jobs", DataTable)
-        table.clear()
-        with self.jobs_lock:
-            self.jobs.clear()
-            for i, u in enumerate(urls):
-                guess = filename_from_fragment(u) or f"part{i+1:02d}.bin"
-                job = Job(u, guess)
-                self.jobs.append(job)
-                table.add_row(guess, "Queued", "", "", "", "", key=self._row_id(job))
-
         self.resolver = Resolver()
         self.shutdown_event.clear()
-        with self.jobs_lock:
-            for job in self.jobs:
-                self.resolve_queue.put(job)
+        for job in pending_jobs:
+            self.resolve_queue.put(job)
         self.resolver_thread = threading.Thread(target=self._resolver_loop, daemon=True)
         self.resolver_thread.start()
 
@@ -374,7 +410,7 @@ class FitFastTUI(App):
         self._pending_urls = []
         self.query_one("#pending", DataTable).clear()
         self._set_controls(running=True)
-        self._log(f"Downloading {len(self.jobs)} file(s) → {self.dest_folder}")
+        self._log(f"Downloading {len(pending_jobs)} file(s) → {self.dest_folder}")
 
     def _resolver_loop(self) -> None:
         while not self.shutdown_event.is_set():
@@ -392,6 +428,16 @@ class FitFastTUI(App):
                 self._fail_job(job, "Resolve error", str(e))
                 continue
             job.filename = filename
+            if self.state is not None:
+                # Drop a preallocated leftover whose .aria2 control file is
+                # gone, otherwise aria2 would call the truncated file complete.
+                ghost = self.state.clear_ghost_file(job.url)
+                if ghost:
+                    self.call_from_thread(
+                        self._log,
+                        f"Discarding unverifiable partial {ghost} (no resume data) "
+                        "— redownloading it.")
+                self.state.record_resolved(job.url, filename)
             self.call_from_thread(self._rename_row, job)
 
             # No pre-flight HEAD check here: aria2's own --continue=true
@@ -494,6 +540,8 @@ class FitFastTUI(App):
                     table.update_cell(rid, "status", "Downloading")
                 elif status == "complete":
                     job.state = "done"
+                    if self.state is not None:
+                        self.state.record_complete(job.url, job.filename, job.total)
                     table.update_cell(rid, "status", "Done")
                     table.update_cell(rid, "pct", "100%")
                     table.update_cell(rid, "eta", "")
@@ -506,6 +554,17 @@ class FitFastTUI(App):
                     table.update_cell(rid, "status", "Waiting")
             except Exception:
                 pass
+
+        # Checkpoint in-flight progress occasionally. The .aria2 control files
+        # carry the byte-level resume state; this just keeps our own view of
+        # filenames and expected sizes fresh for the next run.
+        now = time.time()
+        if self.state is not None and now - self._last_checkpoint >= self.CHECKPOINT_EVERY_S:
+            self._last_checkpoint = now
+            for job in jobs:
+                if job.state == "downloading" and job.total:
+                    self.state.record_progress(
+                        job.url, job.filename, job.total, job.completed)
 
         self.sub_title = (
             f"{done}/{len(jobs)} done"
