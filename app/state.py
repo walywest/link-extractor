@@ -1,0 +1,211 @@
+"""On-disk download state, cached next to the files themselves.
+
+Why this exists
+---------------
+Resolving a fuckingfast.co link is *expensive*: a headless Firefox page load,
+a Cloudflare challenge, two button clicks — 15-35s per link. Without a cache,
+resuming a 40-part repack where 39 parts already finished costs ~20 minutes of
+browser work just to rediscover that there is nothing to do.
+
+Worse, on-disk file size is not evidence of completeness. aria2 runs with
+``--file-allocation=falloc``, so every file is preallocated to its *full* size
+the moment the download starts. A half-finished 4 GB part looks byte-identical
+in size to a finished one. The only real progress record is aria2's own
+``.aria2`` control file — and if that is gone (cancel, crash, kill), aria2 sees
+a full-size file with ``--continue=true`` and declares it complete. That is how
+truncated parts get marked "Done" and blow up at extraction time.
+
+So we keep our own manifest, in the spirit of aria2's control files: one JSON
+file per destination folder recording, per *source* URL (the stable key — the
+signed URL expires), the resolved filename, the expected total size, and
+whether we ever actually saw it finish.
+
+A file counts as complete only when all of these hold:
+  * the manifest says we saw it complete, and
+  * the file exists, and
+  * its size matches the recorded total exactly, and
+  * no ``.aria2`` control file remains beside it (that would mean aria2 still
+    considers the download unfinished).
+
+Anything short of that is re-resolved and handed back to aria2, which resumes
+from the control file if it is there and restarts the part if it is not.
+"""
+from __future__ import annotations
+
+import json
+import os
+import tempfile
+import threading
+from pathlib import Path
+
+MANIFEST_NAME = ".fitfast.json"
+_FORMAT_VERSION = 1
+
+
+class DownloadState:
+    """Manifest of per-file download state for one destination folder.
+
+    Thread-safe: the resolver thread and the UI poll loop both touch this.
+    """
+
+    def __init__(self, folder: Path) -> None:
+        self.folder = Path(folder)
+        self.path = self.folder / MANIFEST_NAME
+        self._lock = threading.RLock()
+        self._entries: dict[str, dict] = {}
+        self._load()
+
+    # ---- persistence ------------------------------------------------------
+    def _load(self) -> None:
+        try:
+            raw = json.loads(self.path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return  # missing or corrupt manifest is not fatal — start empty
+        if not isinstance(raw, dict) or raw.get("version") != _FORMAT_VERSION:
+            return
+        files = raw.get("files")
+        if isinstance(files, dict):
+            self._entries = {k: v for k, v in files.items() if isinstance(v, dict)}
+
+    def save(self) -> None:
+        """Write the manifest atomically so a crash mid-write can't corrupt it."""
+        with self._lock:
+            payload = {
+                "version": _FORMAT_VERSION,
+                "files": dict(self._entries),
+            }
+        try:
+            self.folder.mkdir(parents=True, exist_ok=True)
+            fd, tmp = tempfile.mkstemp(dir=str(self.folder), prefix=".fitfast-", suffix=".tmp")
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                    json.dump(payload, fh, indent=2)
+                    fh.flush()
+                    os.fsync(fh.fileno())
+                os.replace(tmp, self.path)
+            except BaseException:
+                try:
+                    os.unlink(tmp)
+                except OSError:
+                    pass
+                raise
+        except OSError:
+            pass  # a read-only destination shouldn't kill the download
+
+    # ---- queries ----------------------------------------------------------
+    def get(self, url: str) -> dict | None:
+        with self._lock:
+            entry = self._entries.get(url)
+            return dict(entry) if entry else None
+
+    def known_filename(self, url: str) -> str | None:
+        entry = self.get(url)
+        name = entry.get("filename") if entry else None
+        return name or None
+
+    def is_complete(self, url: str) -> bool:
+        """True only if the manifest *and* the disk agree this file is finished.
+
+        Deliberately strict — see the module docstring. A false positive here
+        means handing a truncated archive to the extractor.
+        """
+        entry = self.get(url)
+        if not entry or not entry.get("complete"):
+            return False
+        name = entry.get("filename")
+        total = entry.get("total")
+        if not name or not isinstance(total, int) or total <= 0:
+            return False
+        target = self.folder / name
+        # A leftover .aria2 control file means aria2 still has unfinished
+        # business with this file, whatever our manifest thinks.
+        if target.with_name(target.name + ".aria2").exists():
+            return False
+        try:
+            return target.stat().st_size == total
+        except OSError:
+            return False
+
+    # ---- updates ----------------------------------------------------------
+    def record_resolved(self, url: str, filename: str) -> None:
+        """Remember the filename a URL resolved to, before bytes are moved."""
+        with self._lock:
+            entry = self._entries.setdefault(url, {})
+            entry["filename"] = filename
+            entry.setdefault("complete", False)
+            entry.setdefault("total", 0)
+        self.save()
+
+    def record_progress(self, url: str, filename: str, total: int, completed: int) -> None:
+        """Checkpoint in-flight progress. Never sets ``complete``."""
+        with self._lock:
+            entry = self._entries.setdefault(url, {})
+            entry["filename"] = filename
+            if total > 0:
+                entry["total"] = int(total)
+            entry["completed"] = int(completed)
+            entry.setdefault("complete", False)
+        self.save()
+
+    def record_complete(self, url: str, filename: str, total: int) -> None:
+        """Mark a file finished. Only call when aria2 reported it complete."""
+        with self._lock:
+            entry = self._entries.setdefault(url, {})
+            entry["filename"] = filename
+            if total > 0:
+                entry["total"] = int(total)
+            else:
+                # aria2 didn't give us a length; fall back to the real file so
+                # is_complete() has something exact to compare against.
+                try:
+                    entry["total"] = (self.folder / filename).stat().st_size
+                except OSError:
+                    entry["total"] = 0
+            entry["completed"] = entry["total"]
+            entry["complete"] = True
+        self.save()
+
+    def clear_ghost_file(self, url: str) -> str | None:
+        """Delete a preallocated-but-unfinished file we know we created.
+
+        ``--file-allocation=falloc`` sizes a file to its full length the moment
+        the download starts, so an interrupted part is indistinguishable from a
+        finished one *by size*. aria2's ``.aria2`` control file is what tells
+        the two apart — but if it's gone (kill -9, disk full, manual cleanup),
+        aria2 sees a full-size file with ``--continue=true`` and reports the
+        download complete without transferring a byte. The archive is then
+        truncated and extraction fails with a confusing error.
+
+        We only remove a file when the manifest proves *we* started it and
+        never finished it. A file with no manifest entry is left strictly
+        alone: it may be a genuine complete download from an earlier version
+        or another tool, and deleting it would be data loss.
+
+        Returns the name of the file removed, or None if nothing was touched.
+        """
+        entry = self.get(url)
+        if not entry or entry.get("complete"):
+            return None  # unknown file, or genuinely finished — don't touch it
+        name = entry.get("filename")
+        if not name:
+            return None
+        target = self.folder / name
+        if target.with_name(target.name + ".aria2").exists():
+            return None  # control file present: aria2 can resume properly
+        try:
+            if not target.exists():
+                return None
+            target.unlink()
+        except OSError:
+            return None
+        with self._lock:
+            e = self._entries.get(url)
+            if e is not None:
+                e["completed"] = 0
+        self.save()
+        return name
+
+    def forget(self, url: str) -> None:
+        with self._lock:
+            self._entries.pop(url, None)
+        self.save()
