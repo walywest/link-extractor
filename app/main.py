@@ -21,6 +21,7 @@ if __package__ in (None, ""):
     from app.scraper import scrape_fitgirl_page, game_title_from_links, ScrapeError, is_fitgirl_url
     from app.extractor import extract_all, find_unrar
     from app.log import setup_logging, get_logger, log_exception
+    from app.state import DownloadState
     from app.ui import MainWindow, format_bytes, format_speed, format_eta
 else:
     from . import config as config_mod
@@ -32,6 +33,7 @@ else:
     from .scraper import scrape_fitgirl_page, game_title_from_links, ScrapeError, is_fitgirl_url
     from .extractor import extract_all, find_unrar
     from .log import setup_logging, get_logger, log_exception
+    from .state import DownloadState
     from .ui import MainWindow, format_bytes, format_speed, format_eta
 
 
@@ -131,6 +133,7 @@ class App:
     # they succeed — never left behind for the user to retry by hand.
     RETRY_BASE_DELAY_S = 5.0
     RETRY_MAX_DELAY_S = 60.0
+    CHECKPOINT_EVERY_S = 10.0
 
     def __init__(self) -> None:
         self.config = config_mod.load()
@@ -147,6 +150,8 @@ class App:
         self.dest_folder: Path | None = None
         self.paused = False
         self.running = False
+        self.state: DownloadState | None = None
+        self._last_checkpoint = 0.0
 
         self.resolver: Resolver | None = None
         self.downloader: Downloader | None = None
@@ -328,16 +333,48 @@ class App:
         self.config["delete_archives_after"] = self.window.get_delete_after()
         config_mod.save(self.config)
 
+        # Whatever a previous run left behind for this folder. Files it can
+        # verify as complete never touch Camoufox or aria2 again.
+        self.state = DownloadState(self.dest_folder)
+
         # Build jobs & UI rows
         self.window.clear_rows()
+        cached_done = 0
         with self.jobs_lock:
             self.jobs.clear()
             for i, u in enumerate(urls):
-                guess = filename_from_fragment(u) or f"part{i+1:02d}.bin"
+                cached_name = self.state.known_filename(u)
+                guess = cached_name or filename_from_fragment(u) or f"part{i+1:02d}.bin"
                 job = Job(u, guess)
+                is_cached = self.state.is_complete(u)
+                if is_cached:
+                    entry = self.state.get(u) or {}
+                    job.state = "done"
+                    job.filename = guess
+                    job.total = job.completed = int(entry.get("total") or 0)
+                    cached_done += 1
                 self.jobs.append(job)
                 row = self.window.add_row(str(id(job)), guess, u)
-                row.set_status("Queued")
+                if is_cached:
+                    row.set_progress(1.0)
+                    row.set_status("Done", "#00c853")
+                    row.set_stats(
+                        f"{format_bytes(job.total)}  •  Already downloaded"
+                        if job.total else "Already downloaded"
+                    )
+                else:
+                    row.set_status("Queued")
+
+        pending_jobs = [j for j in self.jobs if j.state != "done"]
+        if cached_done:
+            get_logger().info(
+                "%d file(s) already complete on disk — skipping resolve", cached_done)
+        if not pending_jobs:
+            # Nothing left to fetch: don't start aria2c or Camoufox at all.
+            self.running = True          # so _all_finished tears down cleanly
+            self.window.set_downloading_state(True)
+            self._all_finished(len(self.jobs), 0)
+            return
 
         # Boot downloader + resolver
         try:
@@ -372,9 +409,8 @@ class App:
                 self.reresolve_queue.get_nowait()
             except queue.Empty:
                 break
-        with self.jobs_lock:
-            for job in self.jobs:
-                self.resolve_queue.put(job)
+        for job in pending_jobs:
+            self.resolve_queue.put(job)
 
         self.resolver_thread = threading.Thread(
             target=self._resolver_loop, name="resolver", daemon=True
@@ -385,7 +421,8 @@ class App:
         self.paused = False
         self.window.set_downloading_state(True)
         self.window.set_status_bar(
-            f"Downloading {len(self.jobs)} file(s) to {self.dest_folder}"
+            f"Downloading {len(pending_jobs)} file(s) to {self.dest_folder}"
+            + (f" ({cached_done} already complete)" if cached_done else "")
         )
         if skipped:
             self.window.set_status_bar(
@@ -427,13 +464,29 @@ class App:
                 job.filename = filename
                 target_filename = filename
                 self._schedule_ui(lambda j=job: self._rename_row(j))
+                if self.state is not None:
+                    # falloc sizes a file to its full length the moment the
+                    # download starts, so an interrupted part is size-identical
+                    # to a finished one; only aria2's .aria2 control file tells
+                    # them apart. If that's gone, aria2 would see a full-size
+                    # file with --continue=true and call it complete without
+                    # transferring a byte. Drop such a leftover so it actually
+                    # redownloads. Files we have no record of are never touched.
+                    #
+                    # Fresh resolves only: a re-resolve happens mid-download
+                    # with aria2 still holding the file.
+                    ghost = self.state.clear_ghost_file(job.url)
+                    if ghost:
+                        get_logger().info(
+                            "Discarded unverifiable partial %s (no resume data)", ghost)
+                    self.state.record_resolved(job.url, filename)
 
             # No pre-flight HEAD check here: aria2's own --continue=true
-            # already detects an existing complete file (single plain
-            # request, no data transfer) and resumes a partial one. A
-            # separate requests.head() against the signed URL only adds an
-            # extra hit against a token that may be single-use, which is
-            # exactly what broke real downloads.
+            # resumes a partial file from its .aria2 control file. A separate
+            # requests.head() against the signed URL only adds an extra hit
+            # against a token that may be single-use, which is exactly what
+            # broke real downloads. Completeness is decided by the manifest
+            # above, not by aria2 guessing from file size.
             try:
                 gid = self.downloader.add(signed_url, str(self.dest_folder), target_filename)
             except Exception as e:
@@ -557,6 +610,8 @@ class App:
                     row.set_status("Done", "#00c853")
                     row.set_stats(f"{format_bytes(job.total)}  •  Complete")
                     job.state = "done"
+                    if self.state is not None:
+                        self.state.record_complete(job.url, job.filename, job.total)
                     if job.gid:
                         self.stall_monitor.forget(job.gid)
                 elif status == "error":
@@ -568,6 +623,16 @@ class App:
                     row.set_status("Paused", "#bdbdbd")
                 elif status == "waiting":
                     row.set_status("Waiting", "#bdbdbd")
+
+        # Checkpoint in-flight progress occasionally. The .aria2 control files
+        # carry byte-level resume state; this keeps our own view of filenames
+        # and expected sizes fresh for the next run.
+        if self.state is not None and now - self._last_checkpoint >= self.CHECKPOINT_EVERY_S:
+            self._last_checkpoint = now
+            for job in jobs:
+                if job.state == "downloading" and job.total:
+                    self.state.record_progress(
+                        job.url, job.filename, job.total, job.completed)
 
         # Track peak aggregate — useful for the user to know what the pipe can do
         if agg_speed > self._peak_agg_speed:
