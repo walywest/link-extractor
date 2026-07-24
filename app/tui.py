@@ -437,6 +437,14 @@ class FitFastTUI(App):
                 continue
             job.filename = filename
             if self.state is not None:
+                # Heal a partial left fragmented by the old multi-connection
+                # code so it can resume against this Range-broken CDN.
+                healed = self.state.heal_fragmented_partial(job.url)
+                if healed is not None:
+                    self.call_from_thread(
+                        self._log,
+                        f"Healed fragmented partial {filename} — kept "
+                        f"{format_bytes(healed)}, resuming sequentially.")
                 # Drop a preallocated leftover whose .aria2 control file is
                 # gone, otherwise aria2 would call the truncated file complete.
                 ghost = self.state.clear_ghost_file(job.url)

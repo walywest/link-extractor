@@ -34,12 +34,35 @@ from __future__ import annotations
 
 import json
 import os
+import struct
 import tempfile
 import threading
 from pathlib import Path
 
 MANIFEST_NAME = ".fitfast.json"
 _FORMAT_VERSION = 1
+
+
+def _parse_aria2_control(raw: bytes) -> tuple[int, int, bytes]:
+    """Parse an aria2 (v1) ``.aria2`` control file.
+
+    Layout: version(u16), extension(u32), infoHashLength(u32) + infoHash,
+    pieceLength(u32), totalLength(u64), uploadLength(u64),
+    bitfieldLength(u32) + bitfield, ... (rest unused here).
+
+    Returns (piece_length, total_length, bitfield_bytes).
+    """
+    o = 0
+    o += 2                                             # version
+    o += 4                                             # extension flags
+    (ih_len,) = struct.unpack_from(">I", raw, o); o += 4
+    o += ih_len                                        # info hash (0 for HTTP)
+    (piece_len,) = struct.unpack_from(">I", raw, o); o += 4
+    (total,) = struct.unpack_from(">Q", raw, o); o += 8
+    o += 8                                             # upload length
+    (bf_len,) = struct.unpack_from(">I", raw, o); o += 4
+    bitfield = raw[o:o + bf_len]
+    return piece_len, total, bitfield
 
 
 class DownloadState:
@@ -195,6 +218,18 @@ class DownloadState:
         try:
             if not target.exists():
                 return None
+            size = target.stat().st_size
+        except OSError:
+            return None
+        # A *smaller-than-full* file with no control file is a legitimate
+        # sequential partial (e.g. one healed by heal_fragmented_partial):
+        # aria2 resumes it with an open-ended request from its current size.
+        # Only a *full-size* file with no control file is the dangerous ghost —
+        # aria2 would call it complete without transferring a byte.
+        total = entry.get("total")
+        if isinstance(total, int) and total > 0 and size < total:
+            return None
+        try:
             target.unlink()
         except OSError:
             return None
@@ -204,6 +239,65 @@ class DownloadState:
                 e["completed"] = 0
         self.save()
         return name
+
+    def heal_fragmented_partial(self, url: str) -> int | None:
+        """Repair a partial left with interior gaps by an older multi-connection
+        download, so it can resume against a Range-broken CDN.
+
+        fuckingfast's CDN ignores the *end* of a bounded HTTP Range request
+        (it always answers to EOF), so aria2 can only ever download a file as
+        one sequential stream from its contiguous front. A partial written by
+        the old 16-connection code has completed pieces scattered with holes in
+        between; aria2 must issue bounded requests to fill those holes, every
+        one of which the CDN botches -> "Invalid range header" -> the part can
+        never finish. (A partial with no interior holes — everything done from
+        byte 0 up to some offset — resumes fine and is left untouched.)
+
+        The fix: truncate the file back to its contiguous-from-start prefix,
+        which is known-good, and drop the ``.aria2`` control file. aria2 then
+        resumes with a single open-ended request from that offset and downloads
+        the rest sequentially. Returns the number of bytes kept, or None if
+        there was nothing to heal (no partial, or already gap-free).
+        """
+        entry = self.get(url)
+        if not entry or entry.get("complete"):
+            return None
+        name = entry.get("filename")
+        if not name:
+            return None
+        target = self.folder / name
+        ctrl = target.with_name(target.name + ".aria2")
+        try:
+            raw = ctrl.read_bytes()
+        except OSError:
+            return None  # no control file: nothing to inspect or heal
+        try:
+            piece_len, total, bitfield = _parse_aria2_control(raw)
+        except Exception:
+            return None
+        bits = "".join(f"{b:08b}" for b in bitfield)
+        num_pieces = (total + piece_len - 1) // piece_len
+        bits = bits[:num_pieces]
+        first_gap = bits.find("0")
+        if first_gap < 0:
+            return None  # all pieces present — not fragmented
+        if "1" not in bits[first_gap:]:
+            return None  # contiguous prefix only, no interior holes: resumes fine
+        # Interior hole present -> poisoned partial. Keep only the good prefix.
+        keep = min(first_gap * piece_len, total)
+        try:
+            with open(target, "r+b") as fh:
+                fh.truncate(keep)
+            ctrl.unlink()
+        except OSError:
+            return None
+        with self._lock:
+            e = self._entries.get(url)
+            if e is not None:
+                e["completed"] = keep
+                e["complete"] = False
+        self.save()
+        return keep
 
     def forget(self, url: str) -> None:
         with self._lock:

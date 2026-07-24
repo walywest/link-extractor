@@ -488,6 +488,11 @@ class App:
                     #
                     # Fresh resolves only: a re-resolve happens mid-download
                     # with aria2 still holding the file.
+                    healed = self.state.heal_fragmented_partial(job.url)
+                    if healed is not None:
+                        get_logger().info(
+                            "Healed fragmented partial %s — kept %s, will resume "
+                            "sequentially", filename, format_bytes(healed))
                     ghost = self.state.clear_ghost_file(job.url)
                     if ghost:
                         get_logger().info(
