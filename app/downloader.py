@@ -1,10 +1,24 @@
 """aria2c daemon wrapper using JSON-RPC.
 
 Speed-tuned defaults (see design doc for reasoning):
-  - 16 parallel TCP connections per file
-  - up to 3 files downloading at once (48 sockets total)
+  - ONE connection per file — see below; the CDN can't do multi-connection
+  - up to N files downloading at once (parallelism comes from concurrent files)
   - falloc for instant NTFS pre-allocation, prevents fragmentation
   - 64 MB disk cache to batch writes
+
+Why one connection per file
+---------------------------
+fuckingfast's signed download host (Cloudflare-fronted) mishandles bounded
+HTTP Range requests: for a request like ``Range: bytes=450887680-451936255``
+it returns the correct 1 MB *body* but a ``Content-Range`` whose end is always
+the file's EOF (``450887680-524287999``), not the requested end. aria2's
+multi-connection mode splits a file into bounded segments and strictly
+validates each ``Content-Range`` end, so it rejects every such response with
+"Invalid range header" and the download errors — which is exactly what wedged
+resume for partially-downloaded parts. An *open-ended* request
+(``Range: bytes=450887680-``), which is what a single connection issues, is
+answered correctly, so a single connection downloads and resumes reliably.
+Throughput is recovered by downloading several files concurrently instead.
 """
 from __future__ import annotations
 import io
@@ -114,8 +128,12 @@ class Downloader:
             f"--rpc-secret={self.secret}",
             "--rpc-listen-all=false",
             "--rpc-allow-origin-all=false",
-            f"--max-connection-per-server={self.connections_per_file}",
-            f"--split={self.connections_per_file}",
+            # One connection per file: this CDN returns a to-EOF Content-Range
+            # for bounded segment requests, which aria2 rejects as an invalid
+            # range. Open-ended single-connection requests are honored. See the
+            # module docstring. connections_per_file is intentionally ignored.
+            "--max-connection-per-server=1",
+            "--split=1",
             "--min-split-size=1M",
             f"--max-concurrent-downloads={self.concurrent_files}",
             "--file-allocation=falloc",
