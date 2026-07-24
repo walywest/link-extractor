@@ -40,7 +40,8 @@ else:
 class Job:
     __slots__ = ("url", "guess_name", "state", "filename", "signed_url", "gid",
                  "error", "total", "completed", "speed", "reresolve_count",
-                 "download_started_at", "retry_count", "next_retry_at")
+                 "download_started_at", "retry_count", "next_retry_at",
+                 "best_completed", "fails_without_progress")
 
     def __init__(self, url: str, guess_name: str):
         self.url = url
@@ -57,6 +58,12 @@ class Job:
         self.download_started_at: float = 0.0
         self.retry_count: int = 0
         self.next_retry_at: float = 0.0
+        # Highest byte count this part has ever reached on disk. Used to tell a
+        # part that is *slowly progressing* (worth retrying indefinitely) apart
+        # from one that never transfers a byte (give up before it churns the
+        # resolver forever). Survives across retries; only ever increases.
+        self.best_completed: int = 0
+        self.fails_without_progress: int = 0
 
 
 class StallMonitor:
@@ -129,10 +136,16 @@ class StallMonitor:
 
 class App:
     POLL_INTERVAL_MS = 500
-    # Failed jobs are re-queued automatically with backoff, forever, until
-    # they succeed — never left behind for the user to retry by hand.
+    # Failed jobs are re-queued automatically with exponential backoff. A part
+    # that keeps *making progress* between failures (a slow or flaky mirror,
+    # a signed URL that expires mid-transfer) is retried indefinitely — its
+    # backoff resets every time it advances. A part that fails MANY times in a
+    # row WITHOUT transferring a single new byte is genuinely stuck (dead link,
+    # blocked IP, gone file); we stop hammering it after this many attempts and
+    # surface it as failed instead of churning the resolver on it forever.
     RETRY_BASE_DELAY_S = 5.0
     RETRY_MAX_DELAY_S = 60.0
+    MAX_FAILS_WITHOUT_PROGRESS = 8
     CHECKPOINT_EVERY_S = 10.0
 
     def __init__(self) -> None:
@@ -509,6 +522,8 @@ class App:
         color = None
         if state == "error":
             color = "#ff6b6b"
+        elif state == "failed":
+            color = "#b71c1c"
         elif state == "done":
             color = "#00c853"
         elif state == "downloading":
@@ -545,7 +560,8 @@ class App:
         total_size = 0
         agg_speed = 0
         done_count = 0
-        error_count = 0
+        error_count = 0      # transient: waiting out retry backoff, will retry
+        failed_count = 0     # terminal: given up on, never retried
         active_gids: list[str] = []
 
         with self.jobs_lock:
@@ -563,6 +579,11 @@ class App:
                     self._requeue_failed_job(job)
                 else:
                     error_count += 1
+                continue
+            if job.state == "failed":
+                # Given up on (see _fail_job). Terminal — not retried, and not
+                # counted in error_count so the batch can actually finish.
+                failed_count += 1
                 continue
 
             if job.gid is None:
@@ -649,10 +670,11 @@ class App:
                 if target_job is not None:
                     self._trigger_reresolve(target_job, avg_bps)
 
-        active = len(jobs) - done_count - error_count
+        active = len(jobs) - done_count - error_count - failed_count
         status_line = (
             f"{done_count}/{len(jobs)} done"
             + (f", {error_count} retrying" if error_count else "")
+            + (f", {failed_count} failed" if failed_count else "")
             + f"  •  {format_bytes(total_completed)} of {format_bytes(total_size)}"
             + f"  •  {format_speed(agg_speed)} now"
             + f"  •  peak {format_speed(self._peak_agg_speed)}"
@@ -662,15 +684,47 @@ class App:
             status_line += f"  •  ETA {format_eta(eta)}"
         self.window.set_status_bar(status_line)
 
-        # Failed jobs get re-queued (see above) rather than ever counting as
-        # finished, so only stop once nothing is active AND nothing is stuck
-        # waiting out its retry backoff.
+        # Transient errors get re-queued (see above); terminal failures don't.
+        # Finish once nothing is active AND nothing is still waiting out its
+        # retry backoff — parts we've given up on don't block completion.
         if active == 0 and error_count == 0 and self.running:
-            self._all_finished(done_count, error_count)
+            self._all_finished(done_count, failed_count)
 
     def _fail_job(self, job: Job, status_text: str, error: str | None = None) -> None:
-        """Mark a job failed and schedule its automatic retry (with backoff)."""
+        """Mark a job failed and schedule its automatic retry (with backoff).
+
+        A part that has never transferred a byte across many attempts is treated
+        as permanently stuck and given up on, so it can't churn the resolver
+        forever. A part that keeps advancing keeps being retried indefinitely.
+        """
+        # Did this attempt actually move any bytes since we last checked? If so,
+        # the retry loop is working — reset the failure streak and the backoff.
+        if job.completed > job.best_completed:
+            job.best_completed = job.completed
+            job.fails_without_progress = 0
+        else:
+            job.fails_without_progress += 1
+
         job.retry_count += 1
+        get_logger().warning(
+            "Part failed: %s (attempt %d, %d/%d fails without progress) — %s",
+            job.filename, job.retry_count, job.fails_without_progress,
+            self.MAX_FAILS_WITHOUT_PROGRESS, error or status_text,
+        )
+
+        if job.fails_without_progress >= self.MAX_FAILS_WITHOUT_PROGRESS:
+            get_logger().error(
+                "Giving up on %s after %d attempts with no progress: %s",
+                job.filename, job.retry_count, error or status_text,
+            )
+            # Terminal: the poll loop never re-queues a "failed" job.
+            self._set_state(
+                job, "failed",
+                f"Failed after {job.retry_count} attempts — {status_text}",
+                error=error,
+            )
+            return
+
         delay = min(
             self.RETRY_BASE_DELAY_S * (2 ** (job.retry_count - 1)),
             self.RETRY_MAX_DELAY_S,
@@ -720,6 +774,12 @@ class App:
         summary += f". Saved to {self.dest_folder}"
         self.window.set_status_bar(summary)
         get_logger().info("Batch finished: %d ok, %d failed", done_count, error_count)
+        if error_count:
+            with self.jobs_lock:
+                stuck = [(j.filename, j.error or "unknown")
+                         for j in self.jobs if j.state in ("error", "failed")]
+            for name, why in stuck:
+                get_logger().warning("  failed part: %s — %s", name, why)
         # Cleanup workers
         try:
             self.shutdown_event.set()
@@ -865,7 +925,7 @@ class App:
                             pass
         self._all_finished(
             done_count=sum(1 for j in self.jobs if j.state == "done"),
-            error_count=sum(1 for j in self.jobs if j.state == "error"),
+            error_count=sum(1 for j in self.jobs if j.state in ("error", "failed")),
             extract_ok=False,
         )
         self.window.set_status_bar("Cancelled.")
