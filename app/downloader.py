@@ -136,7 +136,14 @@ class Downloader:
             "--split=1",
             "--min-split-size=1M",
             f"--max-concurrent-downloads={self.concurrent_files}",
-            "--file-allocation=falloc",
+            # No preallocation. falloc was only worthwhile for multi-connection
+            # random writes; single-connection downloads write straight through.
+            # It also can't run on every filesystem — fallocate() fails with
+            # "Operation not supported" on a WSL drvfs mount (/mnt/c), which
+            # killed every part when the TUI ran under WSL. "none" works
+            # everywhere, and without preallocation a partial's on-disk size is
+            # its real progress, so the full-size "ghost" hazard disappears too.
+            "--file-allocation=none",
             "--disk-cache=64M",
             "--continue=true",
             "--auto-file-renaming=false",
