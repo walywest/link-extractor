@@ -52,12 +52,13 @@ else:
 
 class Job:
     __slots__ = ("url", "filename", "state", "gid", "error",
-                 "total", "completed", "speed", "retry_count", "next_retry_at")
+                 "total", "completed", "speed", "retry_count", "next_retry_at",
+                 "best_completed", "fails_without_progress")
 
     def __init__(self, url: str, filename: str):
         self.url = url
         self.filename = filename
-        self.state = "queued"      # queued|resolving|downloading|done|error
+        self.state = "queued"      # queued|resolving|downloading|done|error|failed
         self.gid: str | None = None
         self.error: str | None = None
         self.total = 0
@@ -65,16 +66,23 @@ class Job:
         self.speed = 0
         self.retry_count = 0
         self.next_retry_at = 0.0
+        # Highest byte count this part has ever reached; lets us tell a slowly
+        # progressing part (retry forever) from a truly stuck one (give up).
+        self.best_completed = 0
+        self.fails_without_progress = 0
 
 
 class FitFastTUI(App):
     TITLE = "FitFast Downloader"
     SUB_TITLE = "FitGirl / FuckingFast · terminal edition"
 
-    # Failed jobs are re-queued automatically with backoff, forever, until
-    # they succeed — never left behind for the user to retry by hand.
+    # Failed jobs are re-queued with exponential backoff. A part that keeps
+    # *advancing* between failures retries indefinitely (its backoff resets).
+    # A part that fails this many times WITHOUT moving a byte is given up on,
+    # so a dead link can't churn the single browser resolver forever.
     RETRY_BASE_DELAY_S = 5.0
     RETRY_MAX_DELAY_S = 60.0
+    MAX_FAILS_WITHOUT_PROGRESS = 8
     CHECKPOINT_EVERY_S = 10.0
 
     CSS = """
@@ -456,9 +464,32 @@ class FitFastTUI(App):
 
     def _mark_failed(self, job: Job, error: str) -> float:
         """Record a failure and compute its retry backoff. Pure state, no UI —
-        safe to call from the resolver thread or the (main-thread) poll loop."""
+        safe to call from the resolver thread or the (main-thread) poll loop.
+
+        Returns the retry delay in seconds, or -1.0 if the part has been given
+        up on (state set to "failed"); callers use that to choose row text.
+        """
         job.error = error
+        # Progress since the last failure? Then the retry loop is working:
+        # reset the streak so a slow/flaky part is retried indefinitely.
+        if job.completed > job.best_completed:
+            job.best_completed = job.completed
+            job.fails_without_progress = 0
+        else:
+            job.fails_without_progress += 1
         job.retry_count += 1
+        get_logger().warning(
+            "Part failed: %s (attempt %d, %d/%d fails without progress) — %s",
+            job.filename, job.retry_count, job.fails_without_progress,
+            self.MAX_FAILS_WITHOUT_PROGRESS, error,
+        )
+        if job.fails_without_progress >= self.MAX_FAILS_WITHOUT_PROGRESS:
+            get_logger().error(
+                "Giving up on %s after %d attempts with no progress: %s",
+                job.filename, job.retry_count, error,
+            )
+            job.state = "failed"   # terminal: poll loop never re-queues it
+            return -1.0
         delay = min(
             self.RETRY_BASE_DELAY_S * (2 ** (job.retry_count - 1)),
             self.RETRY_MAX_DELAY_S,
@@ -471,9 +502,11 @@ class FitFastTUI(App):
         """Resolver-thread failure path: mark failed, then hop to the main
         thread to update the row."""
         delay = self._mark_failed(job, error)
-        self.call_from_thread(
-            self._set_status, job, f"{status_text} — retrying in {delay:.0f}s"
-        )
+        if delay < 0:
+            text = f"Failed after {job.retry_count} attempts — {status_text}"
+        else:
+            text = f"{status_text} — retrying in {delay:.0f}s"
+        self.call_from_thread(self._set_status, job, text)
 
     def _requeue_failed_job(self, job: Job) -> None:
         """Its backoff has elapsed — send it back through resolve+download.
@@ -499,7 +532,7 @@ class FitFastTUI(App):
         with self.jobs_lock:
             jobs = list(self.jobs)
         agg_speed = 0
-        done = err = 0
+        done = err = failed = 0
         total_c = total_s = 0
         now = time.time()
         for job in jobs:
@@ -511,6 +544,9 @@ class FitFastTUI(App):
                     self._requeue_failed_job(job)
                 else:
                     err += 1
+                continue
+            if job.state == "failed":
+                failed += 1     # terminal: not retried, doesn't block finishing
                 continue
             if job.gid is None:
                 continue
@@ -547,7 +583,11 @@ class FitFastTUI(App):
                     table.update_cell(rid, "eta", "")
                 elif status == "error":
                     delay = self._mark_failed(job, st.get("errorMessage") or "aria2 error")
-                    table.update_cell(rid, "status", f"Error — retrying in {delay:.0f}s")
+                    if delay < 0:
+                        table.update_cell(rid, "status",
+                                          f"Failed after {job.retry_count} attempts")
+                    else:
+                        table.update_cell(rid, "status", f"Error — retrying in {delay:.0f}s")
                 elif status == "paused":
                     table.update_cell(rid, "status", "Paused")
                 elif status == "waiting":
@@ -569,15 +609,16 @@ class FitFastTUI(App):
         self.sub_title = (
             f"{done}/{len(jobs)} done"
             + (f" · {err} retrying" if err else "")
+            + (f" · {failed} failed" if failed else "")
             + f" · {format_bytes(total_c)}/{format_bytes(total_s)}"
             + f" · {format_speed(agg_speed)}"
         )
-        # Failed jobs get re-queued above rather than ever counting as
-        # finished, so only stop once nothing is active AND nothing is stuck
-        # waiting out its retry backoff.
-        active = len(jobs) - done - err
+        # Transient errors get re-queued above; terminal failures don't. Stop
+        # once nothing is active AND nothing is still waiting out its backoff —
+        # parts we've given up on don't block completion.
+        active = len(jobs) - done - err - failed
         if active == 0 and err == 0 and self.running:
-            self._all_finished(done, err)
+            self._all_finished(done, failed)
 
     def _all_finished(self, done: int, err: int) -> None:
         self.running = False
@@ -585,6 +626,14 @@ class FitFastTUI(App):
         self._log(f"All done — {done} ok"
                   + (f", {err} failed" if err else "")
                   + f". Saved to {self.dest_folder}")
+        get_logger().info("Batch finished: %d ok, %d failed", done, err)
+        if err:
+            with self.jobs_lock:
+                stuck = [(j.filename, j.error or "unknown")
+                         for j in self.jobs if j.state in ("error", "failed")]
+            for name, why in stuck:
+                get_logger().warning("  failed part: %s — %s", name, why)
+                self._log(f"  failed: {name} — {why}")
         self.shutdown_event.set()
         if self.resolver is not None:
             threading.Thread(target=self.resolver.close, daemon=True).start()
