@@ -108,6 +108,15 @@ def format_eta(seconds: float) -> str:
     return f"{m}:{s:02d}"
 
 
+def _fmt_limit(mbps) -> str:
+    """Render a MB/s cap for the entry box; 0 / invalid shows as "0"."""
+    try:
+        v = float(mbps)
+    except (TypeError, ValueError):
+        v = 0.0
+    return "0" if v <= 0 else f"{v:g}"
+
+
 class JobRow(ctk.CTkFrame):
     """One download row: filename, status badge, progress bar, stats."""
 
@@ -280,6 +289,16 @@ class MainWindow:
         self.concurrent_option.set(str(self._config.get("concurrent_files", 3)))
         self.concurrent_option.grid(row=0, column=3, padx=(0, 8), pady=6)
 
+        _speed_label = ctk.CTkLabel(speed, text="Speed limit MB/s  ⓘ")
+        _speed_label.grid(row=0, column=4, padx=(0, 4), pady=6)
+        Tooltip(_speed_label,
+                "Overall download cap across all files, in MB/s. Leave 0 (or blank) for "
+                "unlimited. Handy to keep the download from hogging your connection. "
+                "Applies immediately, even mid-download.")
+        self.speed_limit_entry = ctk.CTkEntry(speed, width=70, placeholder_text="0")
+        self.speed_limit_entry.insert(0, _fmt_limit(self._config.get("max_overall_dl_mbps", 0.0)))
+        self.speed_limit_entry.grid(row=0, column=5, padx=(0, 8), pady=6)
+
         self.auto_reresolve_var = tk.BooleanVar(value=bool(self._config.get("auto_reresolve", True)))
         self.auto_reresolve_check = ctk.CTkCheckBox(
             speed,
@@ -426,6 +445,21 @@ class MainWindow:
             return int(self.concurrent_option.get())
         except ValueError:
             return 3
+
+    def get_speed_limit(self) -> float:
+        """Overall download cap in MB/s from the entry; blank/garbage/negative
+        all mean 0 (unlimited)."""
+        try:
+            raw = self.speed_limit_entry.get().strip()
+        except Exception:
+            return 0.0
+        if not raw:
+            return 0.0
+        try:
+            v = float(raw)
+        except ValueError:
+            return 0.0
+        return v if v > 0 else 0.0
 
     def get_auto_reresolve(self) -> bool:
         return bool(self.auto_reresolve_var.get())
