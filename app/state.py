@@ -188,21 +188,75 @@ class DownloadState:
             entry["complete"] = True
         self.save()
 
+    def adopt_if_finished(self, url: str) -> int | None:
+        """Record a file that finished on disk but was never marked complete.
+
+        A download can finish and the run end before we get to write the
+        manifest — a crash, a kill, or the app wedging elsewhere. The bytes are
+        on disk and correct; only our bookkeeping is behind. Without this we
+        re-resolve and re-download a file that is already perfect (and, worse,
+        ``clear_ghost_file`` used to *delete* it).
+
+        Evidence required: the file is exactly the expected size and aria2 left
+        no control file beside it. Since downloads no longer preallocate
+        (``--file-allocation=none``), reaching full length means the bytes were
+        actually transferred.
+
+        Returns the adopted size, or None if there was nothing to adopt.
+        """
+        entry = self.get(url)
+        if not entry or entry.get("complete"):
+            return None
+        name = entry.get("filename")
+        total = entry.get("total")
+        if not name or not isinstance(total, int) or total <= 0:
+            return None
+        target = self.folder / name
+        if target.with_name(target.name + ".aria2").exists():
+            return None  # aria2 still considers it unfinished
+        try:
+            if target.stat().st_size != total:
+                return None
+        except OSError:
+            return None
+        self.record_complete(url, name, total)
+        return total
+
+    def vanished(self, url: str) -> str | None:
+        """Name of a file the manifest says is complete but that is now gone.
+
+        Seen in the wild: antivirus quarantines a finished archive seconds
+        after it lands, so the download "succeeds" and the file silently is not
+        there. Callers surface this instead of just re-queueing it forever.
+        """
+        entry = self.get(url)
+        if not entry or not entry.get("complete"):
+            return None
+        name = entry.get("filename")
+        if not name:
+            return None
+        return None if (self.folder / name).exists() else name
+
     def clear_ghost_file(self, url: str) -> str | None:
-        """Delete a preallocated-but-unfinished file we know we created.
+        """Delete a preallocated-but-unfinished leftover we know we created.
 
-        ``--file-allocation=falloc`` sizes a file to its full length the moment
-        the download starts, so an interrupted part is indistinguishable from a
-        finished one *by size*. aria2's ``.aria2`` control file is what tells
-        the two apart — but if it's gone (kill -9, disk full, manual cleanup),
-        aria2 sees a full-size file with ``--continue=true`` and reports the
-        download complete without transferring a byte. The archive is then
-        truncated and extraction fails with a confusing error.
+        Legacy hazard: downloads used to run with ``--file-allocation=falloc``,
+        which sized a file to its full length the moment it started, so an
+        interrupted part was indistinguishable from a finished one *by size*.
+        With the ``.aria2`` control file gone (kill -9, disk full, manual
+        cleanup), aria2 saw a full-size file with ``--continue=true`` and
+        declared it complete without transferring a byte — a truncated archive
+        that only failed at extraction time.
 
-        We only remove a file when the manifest proves *we* started it and
-        never finished it. A file with no manifest entry is left strictly
-        alone: it may be a genuine complete download from an earlier version
-        or another tool, and deleting it would be data loss.
+        Preallocation is now off, so new downloads only reach full length by
+        actually transferring the bytes. That makes "full size, no control
+        file" the signature of a *finished* download far more often than a
+        ghost — deleting on that alone destroys good data (see
+        :meth:`adopt_if_finished`, which runs first). So we now additionally
+        require positive evidence of interruption: a checkpoint that recorded
+        genuinely fewer bytes than the file's full length.
+
+        A file with no manifest entry is still left strictly alone.
 
         Returns the name of the file removed, or None if nothing was touched.
         """
@@ -224,10 +278,13 @@ class DownloadState:
         # A *smaller-than-full* file with no control file is a legitimate
         # sequential partial (e.g. one healed by heal_fragmented_partial):
         # aria2 resumes it with an open-ended request from its current size.
-        # Only a *full-size* file with no control file is the dangerous ghost —
-        # aria2 would call it complete without transferring a byte.
         total = entry.get("total")
-        if isinstance(total, int) and total > 0 and size < total:
+        if not isinstance(total, int) or total <= 0 or size < total:
+            return None
+        # Full size. Only a recorded checkpoint proving we never finished makes
+        # this a ghost; otherwise assume the bytes are real and keep them.
+        completed = entry.get("completed")
+        if not isinstance(completed, int) or completed >= total:
             return None
         try:
             target.unlink()

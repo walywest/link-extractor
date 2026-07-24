@@ -1,0 +1,173 @@
+"""Resolve a link in a throwaway subprocess, with a hard timeout.
+
+Why this exists
+---------------
+``Resolver.resolve()`` drives Camoufox/Playwright, and that call can block
+*forever*: the browser launch itself has no timeout, so if it wedges (or the
+browser process dies in a way the sync API never notices) the calling thread
+is stuck with no way out. Observed in the wild twice — it froze the TUI's
+resolver thread and a headless driver, in both cases leaving the download
+dead while the process still looked alive and busy.
+
+There is no reliable in-process cure: the hang happens inside a synchronous
+Playwright call, so no amount of "close the browser from a watchdog thread"
+is guaranteed to unblock it, and tearing down a half-initialised context can
+deadlock on the same lock the hung call holds.
+
+So resolution runs in a *separate process* and the parent enforces the
+timeout. A hung browser dies with its process — the OS guarantees what the
+library cannot — and the parent carries on. The whole process tree is killed
+so no orphan Firefox is left behind.
+
+``SubprocessResolver`` is API-compatible with ``Resolver`` (``resolve()`` /
+``close()``), so callers swap one for the other. The cost is a browser launch
+per link (~7-15s) instead of a reused one; against a 500 MB download that is
+noise, and it buys a resolver that cannot wedge the app.
+"""
+from __future__ import annotations
+
+import json
+import os
+import signal
+import subprocess
+import sys
+from pathlib import Path
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+
+# Generous: real resolves take ~7-35s (Cloudflare challenge + two clicks).
+# Anything past this is a hang, not a slow page.
+RESOLVE_TIMEOUT_S = 180.0
+
+
+class ResolveTimeout(Exception):
+    """The resolve subprocess had to be killed."""
+
+
+def _worker_argv(url: str) -> list[str]:
+    """Command that resolves one URL and prints JSON on stdout."""
+    if getattr(sys, "frozen", False):
+        # In a PyInstaller build sys.executable *is* the app, so re-enter it
+        # through the flag handled in the entry point.
+        return [sys.executable, "--resolve-one", url]
+    return [sys.executable, "-m", "app.resolve_proc", url]
+
+
+def _popen_kwargs() -> dict:
+    """Detach the child so we can kill its whole tree, without a console flash."""
+    kw: dict = {}
+    if os.name == "nt":
+        kw["creationflags"] = (
+            getattr(subprocess, "CREATE_NO_WINDOW", 0)
+            | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+        )
+    else:
+        kw["start_new_session"] = True
+    return kw
+
+
+def _kill_tree(proc: subprocess.Popen) -> None:
+    """Kill the worker *and* any browser it spawned."""
+    if os.name == "nt":
+        subprocess.run(
+            ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+    else:
+        try:
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+        except (ProcessLookupError, PermissionError, OSError):
+            try:
+                proc.kill()
+            except OSError:
+                pass
+    try:
+        proc.wait(timeout=10)
+    except Exception:
+        pass
+
+
+class SubprocessResolver:
+    """Drop-in replacement for :class:`~app.resolver.Resolver` that cannot hang."""
+
+    def __init__(self, timeout: float = RESOLVE_TIMEOUT_S) -> None:
+        self.timeout = timeout
+        self._closed = False
+
+    def close(self) -> None:
+        # Nothing persistent to tear down — each resolve is its own process.
+        self._closed = True
+
+    def resolve(self, url: str, retries: int = 1) -> tuple[str, str]:
+        """Return (signed_url, filename). Raises ResolveError-compatible errors."""
+        from .resolver import ResolveError  # local import: keeps module light
+
+        if self._closed:
+            raise ResolveError("resolver has been closed")
+
+        last = "unknown error"
+        for _attempt in range(retries + 1):
+            try:
+                return self._resolve_once(url)
+            except ResolveTimeout as e:
+                last = str(e)
+            except Exception as e:
+                last = str(e)
+        raise ResolveError(f"resolve failed after retries: {last}")
+
+    def _resolve_once(self, url: str) -> tuple[str, str]:
+        from .resolver import ResolveError
+
+        proc = subprocess.Popen(
+            _worker_argv(url),
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+            cwd=str(REPO_ROOT), **_popen_kwargs()
+        )
+        try:
+            out, err = proc.communicate(timeout=self.timeout)
+        except subprocess.TimeoutExpired:
+            _kill_tree(proc)
+            raise ResolveTimeout(
+                f"resolve exceeded {self.timeout:.0f}s and was killed")
+
+        if proc.returncode != 0:
+            tail = (err or "").strip().splitlines()
+            raise ResolveError(tail[-1] if tail else f"worker exit {proc.returncode}")
+
+        for line in (out or "").splitlines():
+            line = line.strip()
+            if not line.startswith("{"):
+                continue  # ignore library chatter on stdout
+            try:
+                data = json.loads(line)
+            except ValueError:
+                continue
+            if data.get("signed"):
+                return data["signed"], data.get("filename") or ""
+        raise ResolveError("worker produced no result")
+
+
+def _worker_main(argv: list[str]) -> int:
+    """Child entry point: resolve one URL, print JSON, exit."""
+    if not argv:
+        print("usage: resolve_proc <url>", file=sys.stderr)
+        return 2
+    sys.path.insert(0, str(REPO_ROOT))
+    from app.resolver import Resolver
+
+    r = Resolver()
+    try:
+        signed, filename = r.resolve(argv[0], retries=0)
+        # A bare marker line keeps us immune to whatever the browser prints.
+        print(json.dumps({"signed": signed, "filename": filename}), flush=True)
+        return 0
+    finally:
+        try:
+            r.close()
+        except Exception:
+            pass
+
+
+if __name__ == "__main__":
+    raise SystemExit(_worker_main(sys.argv[1:]))
