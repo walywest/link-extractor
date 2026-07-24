@@ -30,6 +30,7 @@ if __package__ in (None, ""):
         Resolver, valid_url, filename_from_fragment,
         common_folder_name, unique_folder, sanitize_filename,
     )
+    from app.resolve_proc import SubprocessResolver
     from app.scraper import scrape_fitgirl_page, game_title_from_links, ScrapeError, is_fitgirl_url
     from app.extractor import extract_all, find_unrar
     from app.log import setup_logging, get_logger, log_exception
@@ -43,6 +44,7 @@ else:
         Resolver, valid_url, filename_from_fragment,
         common_folder_name, unique_folder, sanitize_filename,
     )
+    from .resolve_proc import SubprocessResolver
     from .scraper import scrape_fitgirl_page, game_title_from_links, ScrapeError, is_fitgirl_url
     from .extractor import extract_all, find_unrar
     from .log import setup_logging, get_logger, log_exception
@@ -365,9 +367,18 @@ class FitFastTUI(App):
         table = self.query_one("#jobs", DataTable)
         table.clear()
         skipped = 0
+        adopted = 0
+        vanished: list[str] = []
         with self.jobs_lock:
             self.jobs.clear()
             for i, u in enumerate(urls):
+                # A file that finished but was never recorded (crash, kill) is
+                # already perfect on disk — claim it instead of refetching it.
+                if self.state.adopt_if_finished(u):
+                    adopted += 1
+                gone = self.state.vanished(u)
+                if gone:
+                    vanished.append(gone)
                 cached_name = self.state.known_filename(u)
                 guess = cached_name or filename_from_fragment(u) or f"part{i+1:02d}.bin"
                 job = Job(u, guess)
@@ -391,6 +402,17 @@ class FitFastTUI(App):
         pending_jobs = [j for j in self.jobs if j.state != "done"]
         if skipped:
             self._log(f"{skipped} file(s) already complete on disk — skipping resolve.")
+        if adopted:
+            msg = f"{adopted} file(s) had finished but were never recorded — adopted."
+            self._log(msg)
+            get_logger().info(msg)
+        if vanished:
+            # Almost always antivirus quarantining a finished archive. Say so,
+            # rather than silently downloading it again and again.
+            msg = (f"WARNING: {len(vanished)} file(s) completed earlier but are now "
+                   f"MISSING from disk (antivirus quarantine?): {', '.join(vanished[:5])}")
+            self._log(msg)
+            get_logger().warning(msg)
         if not pending_jobs:
             # Nothing to fetch — don't spawn aria2 or the browser at all.
             self._log("Everything was already downloaded.")
@@ -414,7 +436,9 @@ class FitFastTUI(App):
             self.downloader = None
             return
 
-        self.resolver = Resolver()
+        # Resolve out-of-process: an in-process Camoufox call can hang forever
+        # and wedge the resolver thread (it has, twice). See app/resolve_proc.py.
+        self.resolver = SubprocessResolver()
         self.shutdown_event.clear()
         for job in pending_jobs:
             self.resolve_queue.put(job)

@@ -18,6 +18,7 @@ if __package__ in (None, ""):
         Resolver, ResolveError, valid_url, filename_from_fragment,
         common_folder_name, unique_folder, sanitize_filename,
     )
+    from app.resolve_proc import SubprocessResolver
     from app.scraper import scrape_fitgirl_page, game_title_from_links, ScrapeError, is_fitgirl_url
     from app.extractor import extract_all, find_unrar
     from app.log import setup_logging, get_logger, log_exception
@@ -30,6 +31,7 @@ else:
         Resolver, ResolveError, valid_url, filename_from_fragment,
         common_folder_name, unique_folder, sanitize_filename,
     )
+    from .resolve_proc import SubprocessResolver
     from .scraper import scrape_fitgirl_page, game_title_from_links, ScrapeError, is_fitgirl_url
     from .extractor import extract_all, find_unrar
     from .log import setup_logging, get_logger, log_exception
@@ -355,9 +357,18 @@ class App:
         # Build jobs & UI rows
         self.window.clear_rows()
         cached_done = 0
+        adopted = 0
+        vanished: list[str] = []
         with self.jobs_lock:
             self.jobs.clear()
             for i, u in enumerate(urls):
+                # A file that finished but was never recorded (crash, kill) is
+                # already perfect on disk — claim it instead of refetching it.
+                if self.state.adopt_if_finished(u):
+                    adopted += 1
+                gone = self.state.vanished(u)
+                if gone:
+                    vanished.append(gone)
                 cached_name = self.state.known_filename(u)
                 guess = cached_name or filename_from_fragment(u) or f"part{i+1:02d}.bin"
                 job = Job(u, guess)
@@ -384,6 +395,17 @@ class App:
         if cached_done:
             get_logger().info(
                 "%d file(s) already complete on disk — skipping resolve", cached_done)
+        if adopted:
+            get_logger().info(
+                "%d file(s) had finished but were never recorded — adopted", adopted)
+        if vanished:
+            # Almost always antivirus quarantining a finished archive. Say so,
+            # rather than silently downloading it again and again.
+            get_logger().warning(
+                "%d file(s) completed earlier but are now MISSING from disk "
+                "(antivirus quarantine?): %s", len(vanished), ", ".join(vanished[:5]))
+            self.window.show_toast(
+                f"{len(vanished)} finished file(s) vanished — check antivirus", "error")
         if not pending_jobs:
             # Nothing left to fetch: don't start aria2c or Camoufox at all.
             self.running = True          # so _all_finished tears down cleanly
@@ -413,7 +435,9 @@ class App:
             return
         get_logger().info("Starting %d download(s) into %s", len(self.jobs), self.dest_folder)
 
-        self.resolver = Resolver()
+        # Resolve out-of-process: an in-process Camoufox call can hang forever
+        # and wedge this thread (it has, twice). See app/resolve_proc.py.
+        self.resolver = SubprocessResolver()
         self.shutdown_event.clear()
         # Reset per-session tuning state
         self.stall_monitor = StallMonitor(
