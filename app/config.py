@@ -23,6 +23,8 @@ DEFAULTS: dict = {
     "appearance": "dark",
     "auto_reresolve": True,
     "stall_threshold_mbps": 1.0,
+    # Overall download-speed cap in MB/s across all files; 0 = unlimited.
+    "max_overall_dl_mbps": 0.0,
     "peak_speed_bps": 0,
     "auto_extract": True,
     "delete_archives_after": False,

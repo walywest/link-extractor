@@ -91,7 +91,9 @@ class FitFastTUI(App):
     #inputs Label { color: $text-muted; }
     #buttons { height: auto; padding: 1; }
     #buttons Button { margin: 0 1 0 0; }
-    #opts { height: auto; padding: 0 1; }
+    #opts { height: auto; padding: 0 1; align-vertical: middle; }
+    #bwlimit_label { color: $text-muted; width: auto; margin: 0 1; }
+    .bwlimit { width: 10; margin: 0; }
     #pending_label { color: $text-muted; padding: 0 1; }
     #pending { height: 8; margin: 0 1 1 1; }
     DataTable { height: 1fr; margin: 0 1; }
@@ -145,6 +147,9 @@ class FitFastTUI(App):
                            value=bool(self.config.get("auto_extract", True)), id="autoextract")
             yield Checkbox("Delete archives after extract",
                            value=bool(self.config.get("delete_archives_after", False)), id="delete")
+            yield Label("Speed limit MB/s (0=∞):", id="bwlimit_label")
+            yield Input(value=self._fmt_limit(self.config.get("max_overall_dl_mbps", 0.0)),
+                        id="bwlimit", classes="bwlimit")
         with Horizontal(id="buttons"):
             yield Button("Fetch links", id="fetch", variant="primary")
             yield Button("Remove selected", id="remove")
@@ -395,10 +400,13 @@ class FitFastTUI(App):
             self._all_finished(len(self.jobs), 0)
             return
 
+        limit = self._read_limit_input()
+        self.config["max_overall_dl_mbps"] = limit
         try:
             self.downloader = Downloader(
                 connections_per_file=int(self.config.get("connections_per_file", 16)),
                 concurrent_files=int(self.config.get("concurrent_files", 3)),
+                max_overall_dl_mbps=limit,
             )
             self.downloader.start()
         except (Aria2NotFound, Aria2RpcError) as e:
@@ -469,6 +477,38 @@ class FitFastTUI(App):
                 continue
             job.state = "downloading"
             self.call_from_thread(self._set_status, job, "Starting…")
+
+    # ---- bandwidth limit --------------------------------------------------
+    @staticmethod
+    def _fmt_limit(mbps) -> str:
+        try:
+            v = float(mbps)
+        except (TypeError, ValueError):
+            v = 0.0
+        return "0" if v <= 0 else (f"{v:g}")
+
+    def _read_limit_input(self) -> float:
+        """Parse the speed-limit box; blank/garbage/negative all mean 0 (∞)."""
+        try:
+            raw = self.query_one("#bwlimit", Input).value.strip()
+        except Exception:
+            return float(self.config.get("max_overall_dl_mbps", 0.0) or 0.0)
+        try:
+            v = float(raw)
+        except ValueError:
+            return 0.0
+        return v if v > 0 else 0.0
+
+    def on_input_submitted(self, event: "Input.Submitted") -> None:
+        # Enter in the speed box applies the new cap live to a running download.
+        if event.input.id != "bwlimit":
+            return
+        limit = self._read_limit_input()
+        self.config["max_overall_dl_mbps"] = limit
+        config_mod.save(self.config)
+        if self.downloader is not None:
+            self.downloader.set_overall_limit(limit)
+        self._log(f"Speed limit set to {'unlimited' if limit <= 0 else f'{limit:g} MB/s'}.")
 
     def _mark_failed(self, job: Job, error: str) -> float:
         """Record a failure and compute its retry backoff. Pure state, no UI —

@@ -156,6 +156,8 @@ class App:
         self.window.cancel_button.configure(command=self._on_cancel)
         self.window.speedtest_button.configure(command=self._on_speedtest)
         self.window.fetch_button.configure(command=self._on_fetch_fitgirl)
+        self.window.speed_limit_entry.bind(
+            "<Return>", lambda _e: self._on_speed_limit_changed())
         self.window.root.protocol("WM_DELETE_WINDOW", self._on_close)
 
         self.jobs: list[Job] = []
@@ -390,10 +392,12 @@ class App:
             return
 
         # Boot downloader + resolver
+        self.config["max_overall_dl_mbps"] = self.window.get_speed_limit()
         try:
             self.downloader = Downloader(
                 connections_per_file=self.window.get_connections(),
                 concurrent_files=self.window.get_concurrent(),
+                max_overall_dl_mbps=self.window.get_speed_limit(),
             )
             self.downloader.start()
         except (Aria2NotFound, Aria2RpcError) as e:
@@ -891,6 +895,15 @@ class App:
                 self.window.show_toast(toast_msg, toast_kind, 6000)
 
         self._schedule_ui(finish)
+
+    def _on_speed_limit_changed(self) -> None:
+        limit = self.window.get_speed_limit()
+        self.config["max_overall_dl_mbps"] = limit
+        config_mod.save(self.config)
+        if self.downloader is not None:
+            self.downloader.set_overall_limit(limit)
+        self.window.set_status_bar(
+            "Speed limit: unlimited" if limit <= 0 else f"Speed limit: {limit:g} MB/s")
 
     def _on_pause_toggle(self) -> None:
         if self.downloader is None:

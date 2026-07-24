@@ -109,12 +109,20 @@ def ensure_aria2c() -> Path:
 
 
 class Downloader:
-    def __init__(self, connections_per_file: int = 16, concurrent_files: int = 3) -> None:
+    def __init__(self, connections_per_file: int = 16, concurrent_files: int = 3,
+                 max_overall_dl_mbps: float = 0.0) -> None:
         self.connections_per_file = max(1, min(32, connections_per_file))
         self.concurrent_files = max(1, min(6, concurrent_files))
+        # Overall download cap in MB/s across all files; 0 = unlimited.
+        self.max_overall_dl_mbps = max(0.0, max_overall_dl_mbps)
         self.proc: subprocess.Popen | None = None
         self.port: int | None = None
         self.secret = "fgdl-" + os.urandom(8).hex()
+
+    @staticmethod
+    def _limit_arg(mbps: float) -> str:
+        """aria2 speed value in bytes/s for a MB/s figure; 0 means unlimited."""
+        return str(int(max(0.0, mbps) * 1_048_576))
 
     def start(self) -> None:
         if self.proc is not None:
@@ -136,6 +144,7 @@ class Downloader:
             "--split=1",
             "--min-split-size=1M",
             f"--max-concurrent-downloads={self.concurrent_files}",
+            f"--max-overall-download-limit={self._limit_arg(self.max_overall_dl_mbps)}",
             # No preallocation. falloc was only worthwhile for multi-connection
             # random writes; single-connection downloads write straight through.
             # It also can't run on every filesystem — fallocate() fails with
@@ -222,6 +231,19 @@ class Downloader:
             "out": filename,
         }
         return self._rpc("aria2.addUri", [url], opts)
+
+    def set_overall_limit(self, mbps: float) -> None:
+        """Change the overall download cap (MB/s; 0 = unlimited) on the fly.
+        Safe to call before the daemon is up — it just updates the value used
+        at next start."""
+        self.max_overall_dl_mbps = max(0.0, mbps)
+        if self.proc is None:
+            return
+        try:
+            self._rpc("aria2.changeGlobalOption",
+                      {"max-overall-download-limit": self._limit_arg(self.max_overall_dl_mbps)})
+        except Exception:
+            pass
 
     def change_url(self, gid: str, old_url: str, new_url: str) -> None:
         # aria2.changeUri: gid, fileIndex(1-based), delUris, addUris
