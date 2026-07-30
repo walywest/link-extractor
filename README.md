@@ -1,170 +1,160 @@
-# FitFast Downloader
+# FitFast Downloader — terminal edition
 
-**The easy way to download FitGirl Repacks from fuckingfast.co.** Paste a game page, click a button, and FitFast grabs every part, downloads them all fast, and unzips them for you. No more clicking eighteen links by hand or getting blocked by Cloudflare.
+**Download FitGirl Repacks from fuckingfast.co, from your terminal.** Paste a game page, press Fetch, press Start. It collects every part, gets past Cloudflare, downloads the whole set, and unpacks it for you — with live per-file progress, resume, and a speed limit.
 
-![FitFast Downloader](docs/img/screenshot.png)
+![FitFast Downloader TUI](docs/img/tui.png)
 
-![Platform](https://img.shields.io/badge/works%20on-Windows%2010%20%26%2011-0078d6)
-![Release](https://img.shields.io/github/v/release/DEM9N101/FitFast-Downloader?include_prereleases)
+![Platform](https://img.shields.io/badge/runs%20on-Linux%20%C2%B7%20macOS%20%C2%B7%20WSL-1793d1)
+![UI](https://img.shields.io/badge/ui-Textual%20TUI-5a3fd6)
 ![License](https://img.shields.io/badge/license-MIT-green)
-![Downloads](https://img.shields.io/github/downloads/DEM9N101/FitFast-Downloader/total)
+
+> **This is a fork.** The original [FitFast Downloader](https://github.com/DEM9N101/FitFast-Downloader) by DEM9N101 is a Windows-only Tkinter app shipped as an `.exe` installer. This fork adds a **cross-platform terminal UI** and a long list of correctness fixes found by driving real 100+ part repacks to completion. See [What this fork adds](#what-this-fork-adds).
 
 ---
 
 ## What is this?
 
-FitGirl repacks come as a big stack of `.rar` files (part 1, part 2, part 3, and so on) on a host called **fuckingfast.co**. That host blocks normal download managers like JDownloader with a Cloudflare wall, and it makes you click every single link by hand.
+FitGirl repacks come as a big stack of `.rar` files (`part001`, `part002`, …) hosted on **fuckingfast.co**. That host puts a Cloudflare wall in front of every link, which is why plain download managers like JDownloader get blocked, and it makes you click each part by hand.
 
-**FitFast does all of that for you.** You give it a FitGirl game page, it collects every download link, gets past the block, downloads everything at full speed, and unzips the result into one tidy folder. When it finishes, your game is ready to install.
+FitFast does the whole thing:
 
-## Is it safe?
+1. Scrapes the FitGirl game page for every FuckingFast part link.
+2. Opens each link in a **stealth browser** (Camoufox) that clears Cloudflare on its own and reads out the real signed download URL.
+3. Hands that URL to **aria2**, downloading several files at once with live progress, pause/resume and an optional speed cap.
+4. Unpacks the finished `.rar` set with **unar**/**unrar** into your game folder.
 
-- **The code is open.** Anyone can read exactly what it does, right here in this repository.
-- **Nothing is hidden and nothing phones home.** It downloads only the links you give it.
-- It uses two well known, trusted tools under the hood: **aria2** (a popular fast downloader) and **UnRAR** (the official RAR unzipper), both unchanged.
-- It is not a virus. Windows may still show a warning the first time because the app is new and not yet code-signed (that costs money). The steps below show you how to get past that warning safely.
-
-You use it at your own discretion. See the [disclaimer](#disclaimer) at the bottom.
+Interrupt it whenever you like. It records what finished on disk, so restarting picks up exactly where it left off — no re-resolving, no re-downloading.
 
 ---
 
-## How to install it (about 2 minutes)
+## Install
 
-**Step 1. Download the installer.**
-Go to the [**Releases page**](https://github.com/DEM9N101/FitFast-Downloader/releases/latest) and download the file named **`FitFast-Setup-v1.1.0.exe`** (about 46 MB).
+You need **Python 3.11+**, **aria2c**, and **unar** (or `unrar`) on `PATH`.
 
-**Step 2. Open it.**
-Double-click the file you just downloaded.
+### With devenv / Nix (everything provisioned for you)
 
-Windows might show a blue box that says **"Windows protected your PC."** This is normal for new apps. Click the small **"More info"** link, then click the **"Run anyway"** button that appears. (This happens because the app is not code-signed yet. The code is open here if you want to check it.)
+```sh
+devenv shell        # python + aria2 + unar + the libs
+camoufox fetch      # ONE TIME: downloads the stealth browser (a few hundred MB)
+python fitfast_tui.py
+```
 
-**Step 3. Click through the installer.**
-A simple window opens. Click **Next**, then **Install**. It installs just for you, so it does not ask for an administrator password.
+Or just `make tui`, which does the same in one step.
 
-![Installer](docs/img/installer.png)
+> **On NixOS specifically** you must enable `programs.nix-ld.enable = true;` in `configuration.nix` once and rebuild — Camoufox's Firefox and Playwright's driver are prebuilt dynamically-linked binaries and won't start without it. Full explanation in [NIXOS.md](NIXOS.md).
 
-That is it. FitFast is now in your Start Menu (and on your desktop if you ticked the box).
+### On any other Linux / macOS
 
-> **First time you open it:** FitFast downloads a special browser once, so it can get past the Cloudflare block. This is a few hundred megabytes and takes a few minutes. You only wait for this once. A little window shows the progress. After that, the app opens instantly every time.
+```sh
+python -m venv .venv && . .venv/bin/activate
+pip install -r requirements-tui.txt
+sudo apt install aria2 unar        # or your package manager's equivalent
+camoufox fetch                     # one-time stealth browser download
+python fitfast_tui.py
+```
 
----
-
-## How to use it (three steps)
-
-**Step 1. Get the links.**
-Open your web browser, find the game you want on fitgirl-repacks.site, and copy its page address. Paste that address into the **FitGirl page** box in FitFast and click **Fetch links**.
-
-FitFast opens the page and fills in every download link for you. You will see a green bar confirming it worked.
-
-![After fetching links](docs/img/fetch-success.png)
-
-*(Already have the direct fuckingfast.co links? You can paste them straight into the Links box instead, one per line.)*
-
-**Step 2. Choose where to save it.**
-Click **Browse** and pick a folder (your Downloads folder is fine). FitFast automatically makes a new folder named after the game inside it, so everything stays tidy.
-
-**Step 3. Click Start Downloads.**
-Sit back. FitFast downloads all the parts at once, fixes any slow ones by itself, and unzips everything when it is done. The bar at the bottom keeps you posted.
-
-![Downloading](docs/img/downloading.png)
-
-When you see the "Done" message, open your folder and your game is there, unzipped and ready to install.
+The browser download only happens once. If you skip it, the app tells you and you can press **i** inside the TUI to install it.
 
 ---
 
-## What each button does
+## Using it
 
-Not sure what something means? In the app, hover your mouse over any **ⓘ** mark for a short plain-English explanation. Here is the quick version:
+**1. Get the links.** Paste a `fitgirl-repacks.site` game URL into the top box and press **f** (or click **Fetch links**). It loads the page past Cloudflare and collects every part.
+
+*Already have direct `fuckingfast.co` links? Paste them into the same box instead, space- or newline-separated.*
+
+**2. Review the queue.** Fetched links land in the **Links queued** table *before* anything downloads. Select a row and press **d** to drop it, or **x** to clear the lot — handy for skipping optional bonus content, language packs, and soundtracks.
+
+**3. Set the destination** in the second box. A subfolder named after the game is created inside it automatically.
+
+**4. Start.** Press **s**. The lower table shows per-file status, percentage, size, speed and ETA; the header shows the batch total and combined throughput. When everything lands, the `.rar` set is extracted automatically.
+
+### Keys
+
+| Key | Action |
+| --- | --- |
+| **f** | Fetch links from the pasted page |
+| **s** | Start downloading |
+| **p** | Pause / resume |
+| **c** | Cancel (stops aria2 and the browser cleanly) |
+| **d** | Remove the selected queued link |
+| **x** | Clear all queued links |
+| **i** | Install the stealth browser (one-time) |
+| **q** | Quit |
+| **^p** | Command palette |
+
+Single-letter keys fire when focus isn't inside a text box — otherwise Tab to a button and press Enter.
+
+### Options
 
 | Control | What it does |
 | --- | --- |
-| **FitGirl page** + **Fetch links** | Paste a game page address, click the button, and it copies every download link for you. |
-| **Links** box | The list of download links. Filled in automatically, or paste your own. |
-| **Destination** + **Browse** | Where your game gets saved. |
-| **Subfolder** | The name of the new folder for this game. Filled in automatically; change it if you like. |
-| **Connections/file** | A speed setting. Leave it at 16 unless you know you have a very fast connection. |
-| **Concurrent files** | How many files download at the same time. Leave it at 3 for most connections. |
-| **Test my pipe** | Checks how fast your internet can go right now. |
-| **Auto re-resolve stalled files** | If one file gets stuck on a slow server, FitFast swaps it for a faster one automatically. Keep this on. |
-| **Auto-extract .rar when downloads finish** | Unzips the game for you when everything is downloaded. Keep this on. |
-| **Delete .rar archives after extracting** | Deletes the zip files after a successful unzip, to save space. Optional. |
-| **Start / Pause / Cancel** | Control your downloads. You can pause and come back later. |
-| **Help / About** | A short guide and links, any time you need them. |
-
-Green and red pop-up bars appear at the bottom to tell you when things succeed or when something needs your attention.
+| **Auto-extract .rar when done** | Unpacks the archive set once every part has downloaded. |
+| **Delete archives after extract** | Removes the `.rar` files after a *successful* extraction, to reclaim space. |
+| **Speed limit MB/s (0=∞)** | Caps total download speed across all files. Type a new value and press Enter to apply it **live**, mid-download. |
 
 ---
 
-## If something goes wrong
+## What this fork adds
 
-Most problems have a simple fix. Find yours below.
+Everything below is new relative to upstream `DEM9N101/FitFast-Downloader`. Most of it came out of running real multi-hundred-gigabyte repacks and fixing what actually broke.
 
-**"Windows protected your PC" appears when I open the installer.**
-This is expected for a new app. Click **More info**, then **Run anyway**. It is safe; the whole source is public here.
+### The terminal UI, and getting off Windows
 
-**The first launch is stuck on "Downloading the stealth browser."**
-That is normal and only happens once. It is downloading the browser it needs (a few hundred MB). Leave it running and it will finish. If it fails, check your internet connection and open the app again.
+- **`app/tui.py` — a full Textual TUI** driving the same resolver / downloader / scraper / extractor backends as the Windows GUI, with no Tkinter and no vendored `.exe` dependency. Live per-file progress table, pause/cancel, auto-extract, batch totals in the header.
+- **Cross-platform backends.** `aria2c` now resolves from a vendored binary *or* the system `PATH` (only Windows self-downloads); the extractor finds `unrar`, `rar`, or **`unar`** — the free RAR5 / multi-volume extractor, which is what makes NixOS viable.
+- **`devenv.nix` + `NIXOS.md`** — a reproducible dev shell with Python, aria2 and unar, plus the `NIX_LD_LIBRARY_PATH` / `LD_LIBRARY_PATH` wiring that lets Camoufox's prebuilt Firefox and Playwright's node driver actually launch on NixOS.
+- **`Makefile`** — `make tui` for the terminal UI, `make windows-run` to launch the Windows GUI on a Windows host from inside WSL.
 
-**My antivirus blocked it, or a file went missing.**
-Some antivirus programs wrongly flag download tools. If FitFast will not start or the download engine will not run, add an exception (an "allow" rule) for the FitFast folder in your antivirus, then reinstall.
+### Review the queue before committing to it
+
+- **Pending-links table** with Remove / Clear (`d` / `x`). Upstream committed you to the entire fetched batch blind; a 12-part repack usually includes bonus content you don't want.
+
+### Resume that is instant and *correct*
+
+- **On-disk state cache (`app/state.py`).** A `.fitfast.json` manifest per destination folder, keyed by source URL, recording filename, expected size, and whether the file was ever actually seen to finish. Resuming a 40-part repack with 39 done used to cost ~20 minutes of headless Firefox re-resolving every link just to discover there was nothing to do. Now it starts neither Camoufox nor aria2c.
+- **It also fixes silent corruption.** With `--file-allocation=falloc`, an interrupted part is *byte-size identical* to a finished one; lose the `.aria2` control file and aria2 reports "complete" without transferring anything, leaving a truncated archive that dies at extraction. Completeness is now trusted only when the manifest, the exact size, and the absence of a control file all agree.
+- **Resume in place** instead of creating `Game (2)`, `Game (3)` folders on every restart.
+- Files with **no manifest entry are never touched** — a download from another tool or an older version is always safe.
+
+### Downloads that don't wedge
+
+- **The big one: one connection per file.** FuckingFast's signed CDN ignores the *end* of a bounded HTTP Range request and always answers to EOF, so aria2's 16-connection segmented mode rejected every response with `Invalid range header` and the part failed — forever. Parallelism now comes from downloading several *files* at once. Confirmed against the live CDN.
+- **Healing fragmented partials.** Files left holey by the old multi-connection code could never be completed (the CDN can't fill an interior hole). They're now truncated back to their known-good contiguous prefix so aria2 resumes sequentially.
+- **`--file-allocation=none`.** `fallocate()` returns "Operation not supported" on WSL's `/mnt/c` drvfs mounts, so every part failed instantly at allocation. Preallocation only ever helped multi-connection random writes, which we no longer do.
+- **Retries that give up, and say why.** A part that keeps *advancing* between failures retries indefinitely with backoff. A part that fails 8 times without moving a single byte enters a terminal `failed` state instead of churning the single browser resolver forever. Every per-part failure is logged with its real reason — upstream logged batch totals only, making failures undiagnosable.
+- **Hang-proof resolution.** Camoufox/Playwright browser launch has no timeout and can wedge a thread permanently — observed twice, each time silently killing a download while the process still looked busy. Resolution now runs in a **throwaway subprocess** with a hard timeout that kills the whole process tree on expiry; the OS guarantees termination where the library can't.
+- **Cancel actually stops things.** `Cancel` used to pause downloads without closing aria2c or Camoufox, so every cancel→start cycle orphaned another aria2c *and* another browser in the background.
+- **Vanished-file detection.** Antivirus quarantining a completed archive used to look like success. It's now detected and reported by name.
+
+### Correctness fixes shared with the GUI
+
+- **Filenames come from the URL fragment, not the page title.** FuckingFast serves an identical `<title>` for every part of a repack, so all parts resolved to one colliding filename.
+- **Reliable link fetching.** Headless Camoufox intermittently crashes seconds after these ad-heavy pages load; links are now grabbed immediately after `domcontentloaded`, with spoiler-expansion as best-effort afterwards and a retry if the browser dies before the first grab.
+- **Real error messages.** The GUI's fetch error handler referenced an exception variable after its `except` block had deleted it, so every fetch failure crashed with `NameError` and masked the actual cause.
+- **Dropped the pre-flight `HEAD` check** upstream of aria2 — the signed URL is effectively single-use, and touching it first burned the token.
+- **Speed limit** (`--max-overall-download-limit`), adjustable live mid-download via aria2's RPC.
+
+> The upstream Windows GUI (`app/main.py`, `fitfast.py`) is still in the tree and receives these backend fixes, but this README documents the TUI only.
+
+---
+
+## Troubleshooting
+
+**Fetch fails with a browser or driver launch error.**
+On NixOS this is almost always missing `nix-ld` — see [NIXOS.md](NIXOS.md). Elsewhere, check that `camoufox fetch` completed.
 
 **"Couldn't fetch links from that page."**
-Make sure the address is a FitGirl **game page** (not the homepage and not an "upcoming repacks" post), and that you are online. Then click Fetch links again.
+Make sure it's a FitGirl **game page**, not the homepage or an "upcoming repacks" post.
 
-**A download crawls at a few KB per second.**
-That is the game host giving you a slow server, not FitFast. Keep **Auto re-resolve** turned on and it will try to swap to a faster server. You can also lower **Concurrent files**, or try again later when the host is less busy.
+**A part crawls at a few KB/s.**
+That's the host handing you a slow server. It'll be retried and re-resolved automatically; you can also try again when the host is less busy.
 
-**Some files failed, or nothing downloads.**
-The download links from fuckingfast.co expire after a while. Just click **Start Downloads** again and FitFast will get fresh links and continue from where it stopped.
+**Some parts ended in `failed`.**
+They failed 8 times without transferring a byte. The reason for each is in the log pane and the log file. Signed URLs also expire — pressing **s** again re-resolves and continues from the partials on disk.
 
-**It downloaded but did not unzip.**
-Make sure **Auto-extract** is ticked. If you are running from source, make sure `vendor/UnRAR.exe` is present, or install WinRAR and FitFast will use that instead.
-
-### How to report a problem so it can be fixed
-
-If something breaks, FitFast shows a window with the details. Click **Copy details**, then **Report on GitHub**, and paste (Ctrl+V) into the box that opens. That gives enough information to fix it.
-
-You can also open **Help / About** at any time and click **Open log file** to find the log, or **Report a problem** to go straight to the issue page.
-
-![Help and About](docs/img/help.png)
-
----
-
-## Frequently asked questions
-
-**Is it free?** Yes, completely.
-
-**Do I need to install Python or anything else?** No. The installer includes everything. The only extra thing is the one-time browser download on first launch.
-
-**Does it work on Mac or Linux?** Not yet. Windows 10 and 11 only.
-
-**Where do my games end up?** In the folder you chose with Browse, inside a subfolder named after the game.
-
-**Why is the first-time browser download so big?** It is a full stealth browser, and that is what lets FitFast get past the Cloudflare block that stops other tools. It only downloads once.
-
-**Does it collect my data?** No.
-
----
-
-## For developers: run from source
-
-You need Python 3.11+ and the Camoufox browser.
-
-```bash
-py -m venv .venv
-.venv\Scripts\python -m pip install -r requirements.txt
-.venv\Scripts\python -m camoufox fetch
-.venv\Scripts\python -m app.main
-```
-
-`aria2c.exe` and `UnRAR.exe` are included in `vendor/`. To build the Windows app and installer yourself, see `FitFast.spec` (PyInstaller) and `installer/FitFast.iss` (Inno Setup).
-
-### How it works, briefly
-
-1. A stealth browser (Camoufox) opens the fuckingfast.co page and passes the Cloudflare check on its own, then reads the real signed download link out of the page's response.
-2. That link goes to aria2, which downloads it over 16 connections at once.
-3. A monitor watches each file's speed and, if one stalls, fetches a fresh link and resumes.
-4. When everything is done, UnRAR unpacks the archive set into your game folder.
+**It downloaded but didn't extract.**
+Check that **Auto-extract** is ticked and that `unar` or `unrar` is on `PATH`. The TUI warns at startup if it can't find either.
 
 ---
 
@@ -178,8 +168,6 @@ The software is provided as is, without warranty of any kind. Use it at your own
 
 ## License
 
-MIT for the FitFast code. Bundled tools keep their own licenses: [aria2](https://github.com/aria2/aria2) (GPLv2) and UnRAR (see `vendor/UnRAR-license.txt`, free to redistribute).
+MIT, as upstream. Bundled and external tools keep their own licenses: [aria2](https://github.com/aria2/aria2) (GPLv2), [unar](https://theunarchiver.com/command-line) (LGPL), and UnRAR (see `vendor/UnRAR-license.txt`).
 
----
-
-<sub>Keywords: FitGirl Repacks downloader, fuckingfast downloader, fuckingfast.co downloader, FitGirl repack download manager, download FitGirl repacks fast, fuckingfast batch download, FitGirl multi part rar downloader, bypass Cloudflare download, aria2 game downloader, FitGirl repacks tool, fuckingfast link extractor, FitGirl auto downloader, easy FitGirl downloader.</sub>
+Original work © DEM9N101 — [DEM9N101/FitFast-Downloader](https://github.com/DEM9N101/FitFast-Downloader).
