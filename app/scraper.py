@@ -126,7 +126,8 @@ def _scrape_once(page_url: str, timeout_ms: int) -> tuple[list[str], str | None]
     return links, title
 
 
-def scrape_fitgirl_page(page_url: str, timeout_ms: int = 60_000) -> ScrapeResult:
+def scrape_fitgirl_page(page_url: str, timeout_ms: int = 60_000,
+                        attempts: int = 2) -> ScrapeResult:
     """Return the sorted, de-duplicated FuckingFast links on a FitGirl repack
     post plus the parsed game title. Raises ScrapeError on failure."""
     page_url = page_url.strip()
@@ -136,8 +137,11 @@ def scrape_fitgirl_page(page_url: str, timeout_ms: int = 60_000) -> ScrapeResult
     links: list[str] = []
     title: str | None = None
     last_err: Exception | None = None
-    # Retry once: the browser can crash before we capture anything.
-    for _attempt in range(2):
+    # Retry once: the browser can crash before we capture anything. Callers
+    # that already enforce a hard timeout (app/scrape_proc.py) pass attempts=1
+    # and retry the whole process instead, which halves the worst-case wait and
+    # cannot retry inside a wedged process.
+    for _attempt in range(attempts):
         try:
             links, title = _scrape_once(page_url, timeout_ms)
         except Exception as e:

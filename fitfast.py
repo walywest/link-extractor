@@ -58,6 +58,10 @@ if __name__ == "__main__":
     # Resolution runs in a throwaway subprocess (see app/resolve_proc.py). In a
     # frozen build sys.executable is this exe, so it re-enters here as its own
     # resolve worker. Must be handled before the GUI starts.
+    if "--scrape-one" in sys.argv:
+        from app.scrape_proc import _worker_main as _scrape_worker_main
+        i = sys.argv.index("--scrape-one")
+        raise SystemExit(_scrape_worker_main(sys.argv[i + 1:]))
     if "--resolve-one" in sys.argv:
         from app.resolve_proc import _worker_main
         i = sys.argv.index("--resolve-one")

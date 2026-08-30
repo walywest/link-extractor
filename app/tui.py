@@ -31,7 +31,8 @@ if __package__ in (None, ""):
         common_folder_name, unique_folder, sanitize_filename,
     )
     from app.resolve_proc import SubprocessResolver
-    from app.scraper import scrape_fitgirl_page, game_title_from_links, ScrapeError, is_fitgirl_url
+    from app.scrape_proc import SubprocessScraper, ScrapeTimeout, SCRAPE_TIMEOUT_S
+    from app.scraper import game_title_from_links, ScrapeError, is_fitgirl_url
     from app.extractor import extract_all, find_unrar
     from app.log import setup_logging, get_logger, log_exception
     from app.format import format_bytes, format_speed, format_eta
@@ -45,7 +46,8 @@ else:
         common_folder_name, unique_folder, sanitize_filename,
     )
     from .resolve_proc import SubprocessResolver
-    from .scraper import scrape_fitgirl_page, game_title_from_links, ScrapeError, is_fitgirl_url
+    from .scrape_proc import SubprocessScraper, ScrapeTimeout, SCRAPE_TIMEOUT_S
+    from .scraper import game_title_from_links, ScrapeError, is_fitgirl_url
     from .extractor import extract_all, find_unrar
     from .log import setup_logging, get_logger, log_exception
     from .format import format_bytes, format_speed, format_eta
@@ -133,6 +135,11 @@ class FitFastTUI(App):
         # parked in resolve() reads that as permission to carry on.
         self._run_epoch = 0
         self._fetch_thread: threading.Thread | None = None
+        self._fetch_started_at = 0.0
+        # Held so action_quit can kill an in-flight fetch: the child is
+        # detached into its own process group, so a local reference would
+        # leave a Camoufox tree running after the app is gone.
+        self.scraper: SubprocessScraper | None = None
         self._extract_thread: threading.Thread | None = None
         self._setup_thread: threading.Thread | None = None
         self._pending_urls: list[str] = []
@@ -298,7 +305,14 @@ class FitFastTUI(App):
         if self.running:
             return
         if self._fetch_thread and self._fetch_thread.is_alive():
-            return
+            # Recoverable: a fetch that outlives the subprocess timeout is
+            # wedged, not working. Skipping forever is how one bad fetch used
+            # to kill this button for the rest of the session, silently.
+            age = time.time() - self._fetch_started_at
+            if age < SCRAPE_TIMEOUT_S + 15:
+                self._log("A fetch is already running — give it a moment.")
+                return
+            self._log("Previous fetch never returned; starting a fresh one.")
         url = self.query_one("#url", Input).value.strip()
         if not url:
             self._log("Paste a FitGirl page URL first, then Fetch.")
@@ -311,13 +325,22 @@ class FitFastTUI(App):
             self._log("Stealth browser not installed — press 'i' first.")
             return
         self._log(f"Fetching links from {url} (passing Cloudflare)…")
+        self._fetch_started_at = time.time()
         self._fetch_thread = threading.Thread(
             target=self._fetch_worker, args=(url,), daemon=True)
         self._fetch_thread.start()
 
     def _fetch_worker(self, url: str) -> None:
+        # Out of process, with a hard timeout: an in-process Camoufox launch
+        # can wedge forever, and because action_fetch skips while this thread
+        # is alive, one wedge would kill Fetch for the rest of the session.
+        scraper = SubprocessScraper()
+        self.scraper = scraper
         try:
-            result = scrape_fitgirl_page(url)
+            result = scraper.scrape(url)
+        except ScrapeTimeout as e:
+            self.call_from_thread(self._log, f"Fetch failed: {e}")
+            return
         except ScrapeError as e:
             self.call_from_thread(self._log, f"Fetch failed: {e}")
             return
@@ -325,6 +348,9 @@ class FitFastTUI(App):
             tb = log_exception("fetching FitGirl page", e)
             self.call_from_thread(self._log, f"Fetch failed: {e}")
             return
+        finally:
+            if self.scraper is scraper:
+                self.scraper = None
         subfolder = game_title_from_links(result.links) or result.title or ""
         self.call_from_thread(self._fetch_done, result.links, subfolder)
 
@@ -852,6 +878,13 @@ class FitFastTUI(App):
         try:
             if self.resolver is not None:
                 self.resolver.close()
+        except Exception:
+            pass
+        try:
+            # Synchronous, like the resolver close: the kill has to finish
+            # before the interpreter exits or the orphan is what we get.
+            if self.scraper is not None:
+                self.scraper.close()
         except Exception:
             pass
         self.exit()
