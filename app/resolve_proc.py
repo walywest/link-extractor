@@ -138,8 +138,20 @@ class SubprocessResolver:
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
             cwd=str(REPO_ROOT), **_popen_kwargs()
         )
+        # Register and re-check under one lock: otherwise a close() landing
+        # between Popen and registration finds _proc still None, kills nothing,
+        # and the worker it missed runs to the full timeout. Either close()
+        # sees the handle, or registration sees the flag — no ordering leaks.
         with self._lock:
-            self._proc = proc
+            closed = self._closed
+            if not closed:
+                self._proc = proc
+        if closed:
+            # Decide under the lock, kill outside it: _kill_tree ends in a
+            # wait(timeout=10), and holding the lock across that would stall a
+            # concurrent close() just trying to read the handle.
+            _kill_tree(proc)
+            raise ResolveError("resolver was closed mid-resolve")
         try:
             try:
                 out, err = proc.communicate(timeout=self.timeout)
