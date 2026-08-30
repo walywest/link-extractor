@@ -162,13 +162,39 @@ class Resolver:
         page.route("**/*", _route)
 
         captured: dict = {"signed_url": None}
+        # Id-redacted trace of what the page actually did, so a failure can say
+        # why instead of only "nothing captured". Never holds a signed URL.
+        trace: list[str] = []
+
+        def _shape(u: str) -> str:
+            """host + path with the file id blanked — safe to log."""
+            try:
+                without_scheme = u.split("://", 1)[-1]
+                hostpath = without_scheme.split("?", 1)[0].split("#", 1)[0]
+                # Blank only id-shaped segments (long, and containing a digit
+                # or mixed case). Plain words like /go or /verify are the part
+                # of the path worth seeing.
+                return re.sub(
+                    r"/(?=[A-Za-z0-9_-]{6,}(?:/|$))(?![a-z-]+(?:/|$))[A-Za-z0-9_-]+",
+                    "/<id>", hostpath)
+            except Exception:
+                return "<unparsable>"
 
         def on_response(resp):
             try:
-                if "/f/" in resp.url and resp.url.rstrip("/").endswith("/go"):
-                    hx = resp.headers.get("hx-redirect") or resp.headers.get("HX-Redirect")
-                    if hx:
-                        captured["signed_url"] = hx
+                # Match on the header, not the URL. hx-redirect *is* the
+                # signal; keying on "/f/<id>/go" coupled us to a path we do not
+                # control, so an endpoint change would silently capture nothing
+                # while the header sat right there on the response.
+                hx = (resp.headers.get("hx-redirect")
+                      or resp.headers.get("HX-Redirect"))
+                if hx:
+                    captured["signed_url"] = hx
+                    return
+                if len(trace) < 12 and (
+                        "/f/" in resp.url or resp.request.method != "GET"):
+                    trace.append(
+                        f"{resp.request.method} {_shape(resp.url)} -> {resp.status}")
             except Exception:
                 pass
 
@@ -199,7 +225,10 @@ class Resolver:
                 page.wait_for_timeout(200)
 
             if not captured["signed_url"]:
-                raise ResolveError("no hx-redirect header captured after 20s")
+                detail = "; ".join(trace) if trace else "no candidate responses at all"
+                raise ResolveError(
+                    "no hx-redirect header on any response after 20s "
+                    f"(saw: {detail})")
 
             filename = self._pick_filename(url, title)
             return captured["signed_url"], filename
