@@ -31,6 +31,7 @@ import os
 import signal
 import subprocess
 import sys
+import threading
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -94,10 +95,19 @@ class SubprocessResolver:
     def __init__(self, timeout: float = RESOLVE_TIMEOUT_S) -> None:
         self.timeout = timeout
         self._closed = False
+        # The in-flight worker, so close() can actually stop it. Without this
+        # a cancelled resolve keeps its Camoufox browser alive until the
+        # worker finishes or hits the full timeout — minutes of CPU, memory
+        # and network competing with the batch the user still wants.
+        self._proc: subprocess.Popen | None = None
+        self._lock = threading.Lock()
 
     def close(self) -> None:
-        # Nothing persistent to tear down — each resolve is its own process.
         self._closed = True
+        with self._lock:
+            proc = self._proc
+        if proc is not None and proc.poll() is None:
+            _kill_tree(proc)
 
     def resolve(self, url: str, retries: int = 1) -> tuple[str, str]:
         """Return (signed_url, filename). Raises ResolveError-compatible errors."""
@@ -108,6 +118,10 @@ class SubprocessResolver:
 
         last = "unknown error"
         for _attempt in range(retries + 1):
+            # Re-check per attempt: a close() landing mid-resolve must not be
+            # followed by another browser launch for a cancelled job.
+            if self._closed:
+                raise ResolveError("resolver has been closed")
             try:
                 return self._resolve_once(url)
             except ResolveTimeout as e:
@@ -124,12 +138,21 @@ class SubprocessResolver:
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
             cwd=str(REPO_ROOT), **_popen_kwargs()
         )
+        with self._lock:
+            self._proc = proc
         try:
-            out, err = proc.communicate(timeout=self.timeout)
-        except subprocess.TimeoutExpired:
-            _kill_tree(proc)
-            raise ResolveTimeout(
-                f"resolve exceeded {self.timeout:.0f}s and was killed")
+            try:
+                out, err = proc.communicate(timeout=self.timeout)
+            except subprocess.TimeoutExpired:
+                _kill_tree(proc)
+                raise ResolveTimeout(
+                    f"resolve exceeded {self.timeout:.0f}s and was killed")
+        finally:
+            with self._lock:
+                if self._proc is proc:
+                    self._proc = None
+        if self._closed:
+            raise ResolveError("resolver was closed mid-resolve")
 
         if proc.returncode != 0:
             tail = (err or "").strip().splitlines()
