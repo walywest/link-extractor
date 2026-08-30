@@ -839,6 +839,10 @@ class FitFastTUI(App):
         self.query_one("#cancel", Button).disabled = not running
 
     def action_quit(self) -> None:
+        # close()/stop() stay synchronous here, unlike cancel: killing the
+        # browser tree has to finish before the interpreter exits, or we orphan
+        # a Camoufox. That can cost a moment on the way out; a background
+        # thread would be a daemon and die mid-kill, leaving the orphan.
         self.shutdown_event.set()
         try:
             if self.downloader is not None:
