@@ -1,7 +1,14 @@
 """Resolve fuckingfast.co URLs to signed direct download URLs via Camoufox.
 
-The flow (confirmed by probing the site 2026-07-12):
-  1. Load the page — Camoufox silently passes Cloudflare's JS challenge.
+The flow (probed 2026-07-12; challenge step re-diagnosed 2026-08-30):
+  1. Load the page and wait for Cloudflare to be satisfied. This used to be a
+     passive JS challenge Camoufox cleared on its own, so a fixed 2.5s wait was
+     enough. It is now an interactive Turnstile widget: a live trace showed
+     every resolve failing with the challenge issued and exercised
+     (challenges.cloudflare.com .../turnstile/... and .../cdn-cgi/challenge-
+     platform/... , all 200) but never satisfied, so the download endpoint was
+     never reached at all — zero /go requests. We now wait for the widget's
+     token instead of guessing at a duration.
   2. Block ad domains + neuter window.open so popups don't fire.
   3. Click the DOWNLOAD button twice. The second click triggers an HTMX
      POST to /f/<id>/go whose response header `hx-redirect` contains the
@@ -106,10 +113,12 @@ class Resolver:
     def _ensure_browser(self) -> None:
         if self._browser is not None:
             return
-        # humanize=False: fuckingfast.co uses Cloudflare's passive JS challenge,
-        # not behavioural analysis, so mouse-movement simulation just slows us
-        # down and can push click actions past their timeout on repeat visits.
-        self._cm = Camoufox(headless=True, humanize=False, geoip=False)
+        # humanize=True: that comment's premise (passive JS challenge, no
+        # behavioural analysis) held when it was written and no longer does —
+        # the site now serves an interactive Turnstile. Cursor simulation costs
+        # us time on every resolve, which is why it was off; being unable to
+        # resolve at all costs more.
+        self._cm = Camoufox(headless=True, humanize=True, geoip=False)
         self._browser = self._cm.__enter__()
 
     def close(self) -> None:
@@ -174,9 +183,17 @@ class Resolver:
                 # Blank only id-shaped segments (long, and containing a digit
                 # or mixed case). Plain words like /go or /verify are the part
                 # of the path worth seeing.
-                return re.sub(
+                host, slash, path = hostpath.partition("/")
+                path = slash + path
+                path = re.sub(
                     r"/(?=[A-Za-z0-9_-]{6,}(?:/|$))(?![a-z-]+(?:/|$))[A-Za-z0-9_-]+",
-                    "/<id>", hostpath)
+                    "/<id>", path)
+                # Cloudflare's challenge tokens are colon- and dot-separated so
+                # they survive per-segment redaction. Blank any long opaque run
+                # too — this string can end up in the on-disk log. Host is left
+                # alone: which host answered is the most useful part.
+                path = re.sub(r"[A-Za-z0-9_.:+-]{24,}", "<tok>", path)
+                return host + path
             except Exception:
                 return "<unparsable>"
 
@@ -202,7 +219,8 @@ class Resolver:
 
         try:
             page.goto(url, wait_until="domcontentloaded", timeout=60_000)
-            page.wait_for_timeout(2500)
+            challenge = self._await_challenge(page)
+            page.wait_for_timeout(500)   # let the button's handler bind
 
             title = ""
             try:
@@ -228,7 +246,7 @@ class Resolver:
                 detail = "; ".join(trace) if trace else "no candidate responses at all"
                 raise ResolveError(
                     "no hx-redirect header on any response after 20s "
-                    f"(saw: {detail})")
+                    f"(challenge: {challenge}; saw: {detail})")
 
             filename = self._pick_filename(url, title)
             return captured["signed_url"], filename
@@ -237,6 +255,34 @@ class Resolver:
                 page.close()
             except Exception:
                 pass
+
+    @staticmethod
+    def _await_challenge(page, timeout_s: float = 30.0) -> str:
+        """Block until Cloudflare's Turnstile hands out a token.
+
+        Returns a short status for the error message: 'none' (no widget on the
+        page — nothing to wait for), 'solved', or 'unsolved' (widget present,
+        no token inside the window). Clicking before the token exists is the
+        failure we are avoiding: the button is there and the click lands, but
+        its handler will not fire the HTMX POST, so the resolve dies 20s later
+        having never touched the download endpoint.
+        """
+        deadline = time.time() + timeout_s
+        seen_widget = False
+        while time.time() < deadline:
+            try:
+                token = page.evaluate(
+                    "() => { const e = document.querySelector("
+                    "'input[name=\"cf-turnstile-response\"]');"
+                    " return e ? e.value : null; }")
+            except Exception:
+                token = None
+            if token is not None:
+                seen_widget = True
+                if token:
+                    return "solved"
+            page.wait_for_timeout(250)
+        return "unsolved" if seen_widget else "none"
 
     @staticmethod
     def _pick_filename(url: str, title: str) -> str:
