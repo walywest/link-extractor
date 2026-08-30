@@ -75,6 +75,13 @@ class DownloadState:
         self.folder = Path(folder)
         self.path = self.folder / MANIFEST_NAME
         self._lock = threading.RLock()
+        # Serialises whole writes. The entry lock only guards the snapshot;
+        # without this two savers can replace out of order and the manifest
+        # regresses to an older view — which only shows up if the process
+        # dies before the next save, i.e. exactly the crash the manifest
+        # exists to survive. Separate from _lock so readers don't block on
+        # the fsync.
+        self._write_lock = threading.Lock()
         self._entries: dict[str, dict] = {}
         self._load()
 
@@ -92,28 +99,30 @@ class DownloadState:
 
     def save(self) -> None:
         """Write the manifest atomically so a crash mid-write can't corrupt it."""
-        with self._lock:
-            payload = {
-                "version": _FORMAT_VERSION,
-                "files": dict(self._entries),
-            }
-        try:
-            self.folder.mkdir(parents=True, exist_ok=True)
-            fd, tmp = tempfile.mkstemp(dir=str(self.folder), prefix=".fitfast-", suffix=".tmp")
+        with self._write_lock:
+            with self._lock:
+                payload = {
+                    "version": _FORMAT_VERSION,
+                    "files": dict(self._entries),
+                }
             try:
-                with os.fdopen(fd, "w", encoding="utf-8") as fh:
-                    json.dump(payload, fh, indent=2)
-                    fh.flush()
-                    os.fsync(fh.fileno())
-                os.replace(tmp, self.path)
-            except BaseException:
+                self.folder.mkdir(parents=True, exist_ok=True)
+                fd, tmp = tempfile.mkstemp(
+                    dir=str(self.folder), prefix=".fitfast-", suffix=".tmp")
                 try:
-                    os.unlink(tmp)
-                except OSError:
-                    pass
-                raise
-        except OSError:
-            pass  # a read-only destination shouldn't kill the download
+                    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                        json.dump(payload, fh, indent=2)
+                        fh.flush()
+                        os.fsync(fh.fileno())
+                    os.replace(tmp, self.path)
+                except BaseException:
+                    try:
+                        os.unlink(tmp)
+                    except OSError:
+                        pass
+                    raise
+            except OSError:
+                pass  # a read-only destination shouldn't kill the download
 
     # ---- queries ----------------------------------------------------------
     def get(self, url: str) -> dict | None:
