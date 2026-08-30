@@ -462,8 +462,14 @@ class FitFastTUI(App):
                 return
             self.call_from_thread(self._set_status, job, "Resolving…")
             job.state = "resolving"
+            # Cancel and batch teardown run on the main thread and drop both
+            # backends while this thread is mid-flight, so bind them to locals
+            # and re-check instead of dereferencing None mid-loop.
+            resolver = self.resolver
+            if resolver is None:
+                return
             try:
-                signed_url, filename = self.resolver.resolve(job.url)
+                signed_url, filename = resolver.resolve(job.url)
             except Exception as e:
                 self._fail_job(job, "Resolve error", str(e))
                 continue
@@ -494,8 +500,15 @@ class FitFastTUI(App):
             # separate requests.head() against the signed URL only adds an
             # extra hit against a token that may be single-use, which is
             # exactly what broke real downloads.
+            # resolve() above can take minutes; by the time it returns the
+            # main thread may have torn the downloader down (Cancel, or the
+            # batch finishing). That isn't an "aria2 error" — there is simply
+            # nothing left to add to, so stop rather than fail the part.
+            downloader = self.downloader
+            if self.shutdown_event.is_set() or downloader is None:
+                return
             try:
-                job.gid = self.downloader.add(signed_url, str(self.dest_folder), filename)
+                job.gid = downloader.add(signed_url, str(self.dest_folder), filename)
             except Exception as e:
                 self._fail_job(job, "aria2 error", str(e))
                 continue
