@@ -128,6 +128,10 @@ class FitFastTUI(App):
         self.resolve_queue: "queue.Queue[Job]" = queue.Queue()
         self.shutdown_event = threading.Event()
         self.resolver_thread: threading.Thread | None = None
+        # Bumped on every Start. shutdown_event alone cannot retire an old
+        # resolver thread: Start clears the flag again, and a thread still
+        # parked in resolve() reads that as permission to carry on.
+        self._run_epoch = 0
         self._fetch_thread: threading.Thread | None = None
         self._extract_thread: threading.Thread | None = None
         self._setup_thread: threading.Thread | None = None
@@ -214,6 +218,12 @@ class FitFastTUI(App):
             event.button.id, lambda: None)()
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
+        # One handler for every Input: Textual dispatches by event type, not by
+        # widget, so a second `def on_input_submitted` would silently shadow
+        # this one and kill whichever box it did not handle. Dispatch on the id.
+        if event.input.id == "bwlimit":
+            self._apply_limit_input()
+            return
         # Enter in the URL box fetches a FitGirl page, or loads direct
         # links into the review list so they can be checked/removed first.
         if event.input.id == "url":
@@ -439,6 +449,8 @@ class FitFastTUI(App):
         # Resolve out-of-process: an in-process Camoufox call can hang forever
         # and wedge the resolver thread (it has, twice). See app/resolve_proc.py.
         self.resolver = SubprocessResolver()
+        self._run_epoch += 1
+        epoch = self._run_epoch
         self.shutdown_event.clear()
         # A cancelled batch leaves its Job objects sitting in the queue. Those
         # jobs are gone from self.jobs (cleared above) but the new resolver
@@ -453,7 +465,8 @@ class FitFastTUI(App):
                 break
         for job in pending_jobs:
             self.resolve_queue.put(job)
-        self.resolver_thread = threading.Thread(target=self._resolver_loop, daemon=True)
+        self.resolver_thread = threading.Thread(
+            target=self._resolver_loop, args=(epoch,), daemon=True)
         self.resolver_thread.start()
 
         self.running = True
@@ -463,13 +476,25 @@ class FitFastTUI(App):
         self._set_controls(running=True)
         self._log(f"Downloading {len(pending_jobs)} file(s) → {self.dest_folder}")
 
-    def _resolver_loop(self) -> None:
-        while not self.shutdown_event.is_set():
+    def _stale(self, epoch: int) -> bool:
+        """True once this run is over — cancelled, finished, or superseded
+        by a newer Start."""
+        return self.shutdown_event.is_set() or epoch != self._run_epoch
+
+    def _resolver_loop(self, epoch: int) -> None:
+        while not self._stale(epoch):
             try:
                 job = self.resolve_queue.get(timeout=0.5)
             except queue.Empty:
                 continue
-            if self.shutdown_event.is_set():
+            if self._stale(epoch):
+                # This job may belong to the *new* batch: _start drains the
+                # queue and repopulates it while a retiring thread is still
+                # parked in get(). Dropping it would strand a row on "Queued"
+                # forever and _poll would never reach active == 0, hanging the
+                # run. Put it back — the next _start drains before repopulating,
+                # so a genuinely dead job cannot leak into the following batch.
+                self.resolve_queue.put(job)
                 return
             self.call_from_thread(self._set_status, job, "Resolving…")
             job.state = "resolving"
@@ -486,7 +511,7 @@ class FitFastTUI(App):
                 # can land *inside* the call above, not just before it. That
                 # raises, and blaming the part for a download the user just
                 # cancelled is the same mis-blame the guards above prevent.
-                if self.shutdown_event.is_set():
+                if self._stale(epoch):
                     return
                 self._fail_job(job, "Resolve error", str(e))
                 continue
@@ -522,12 +547,12 @@ class FitFastTUI(App):
             # batch finishing). That isn't an "aria2 error" — there is simply
             # nothing left to add to, so stop rather than fail the part.
             downloader = self.downloader
-            if self.shutdown_event.is_set() or downloader is None:
+            if self._stale(epoch) or downloader is None:
                 return
             try:
                 job.gid = downloader.add(signed_url, str(self.dest_folder), filename)
             except Exception as e:
-                if self.shutdown_event.is_set():
+                if self._stale(epoch):
                     return
                 self._fail_job(job, "aria2 error", str(e))
                 continue
@@ -555,10 +580,8 @@ class FitFastTUI(App):
             return 0.0
         return v if v > 0 else 0.0
 
-    def on_input_submitted(self, event: "Input.Submitted") -> None:
-        # Enter in the speed box applies the new cap live to a running download.
-        if event.input.id != "bwlimit":
-            return
+    def _apply_limit_input(self) -> None:
+        """Enter in the speed box applies the new cap live to a running download."""
         limit = self._read_limit_input()
         self.config["max_overall_dl_mbps"] = limit
         config_mod.save(self.config)
