@@ -15,8 +15,10 @@ from pathlib import Path
 
 if __package__ in (None, ""):
     from paths import VENDOR_DIR
+    from log import get_logger
 else:
     from .paths import VENDOR_DIR
+    from .log import get_logger
 
 BUNDLED_UNRAR = VENDOR_DIR / "UnRAR.exe"
 
@@ -176,19 +178,35 @@ def extract_all(
     return ok_count, fail_count
 
 
+def _unlink(path: Path) -> None:
+    """Delete one archive, saying so if it fails — this path exists to reclaim
+    tens of GB, and a silent failure looks like the space simply never came
+    back."""
+    try:
+        path.unlink()
+    except OSError as e:
+        get_logger().warning("Could not delete %s — %s", path.name, e)
+
+
 def _delete_set(first_volume: Path) -> None:
     """Delete every volume belonging to a set once it's safely extracted."""
     folder = first_volume.parent
     # part01.rar -> match part\d+.rar with same prefix; else just the file.
     base = re.sub(r"\.part0*1\.rar$", "", first_volume.name, flags=re.IGNORECASE)
-    if base != first_volume.name:
-        for f in folder.glob(base + ".part*.rar"):
-            try:
-                f.unlink()
-            except OSError:
-                pass
-    else:
-        try:
-            first_volume.unlink()
-        except OSError:
-            pass
+    if base == first_volume.name:
+        _unlink(first_volume)
+        return
+    # Match by exact prefix, never by glob. Repack names routinely contain
+    # [brackets], which a glob reads as a character class: the set's own
+    # volumes then fail to match their own pattern, while unrelated archives
+    # differing only at that position do match and get deleted. This is the
+    # one path that removes the user's files, so it is exact by construction.
+    prefix = base + ".part"
+    for f in folder.iterdir():
+        name = f.name
+        if not name.lower().endswith(".rar"):
+            continue
+        if not name[:len(prefix)].lower() == prefix.lower():
+            continue
+        if name[len(prefix):-4].isdigit() and f.is_file():
+            _unlink(f)
