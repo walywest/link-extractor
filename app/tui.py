@@ -440,6 +440,17 @@ class FitFastTUI(App):
         # and wedge the resolver thread (it has, twice). See app/resolve_proc.py.
         self.resolver = SubprocessResolver()
         self.shutdown_event.clear()
+        # A cancelled batch leaves its Job objects sitting in the queue. Those
+        # jobs are gone from self.jobs (cleared above) but the new resolver
+        # thread would still pop them: a second Camoufox launch per file, a
+        # second single-use token burnt, and an aria2 gid on a job _poll can
+        # never see — an invisible download racing the real one for the same
+        # filename in the same folder. Drop them before queueing the new batch.
+        while not self.resolve_queue.empty():
+            try:
+                self.resolve_queue.get_nowait()
+            except queue.Empty:
+                break
         for job in pending_jobs:
             self.resolve_queue.put(job)
         self.resolver_thread = threading.Thread(target=self._resolver_loop, daemon=True)
@@ -471,6 +482,12 @@ class FitFastTUI(App):
             try:
                 signed_url, filename = resolver.resolve(job.url)
             except Exception as e:
+                # close()/stop() run on background threads during teardown and
+                # can land *inside* the call above, not just before it. That
+                # raises, and blaming the part for a download the user just
+                # cancelled is the same mis-blame the guards above prevent.
+                if self.shutdown_event.is_set():
+                    return
                 self._fail_job(job, "Resolve error", str(e))
                 continue
             job.filename = filename
@@ -510,6 +527,8 @@ class FitFastTUI(App):
             try:
                 job.gid = downloader.add(signed_url, str(self.dest_folder), filename)
             except Exception as e:
+                if self.shutdown_event.is_set():
+                    return
                 self._fail_job(job, "aria2 error", str(e))
                 continue
             job.state = "downloading"
