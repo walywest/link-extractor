@@ -17,6 +17,53 @@ def browser_ready() -> bool:
         return False
 
 
+# Cloudflare's interactive Turnstile will not vouch for a Firefox build no real
+# user runs. A months-old bundle resolves nothing while looking perfectly
+# healthy — every request 200, the challenge simply never satisfied — so say so
+# loudly rather than let it present as "the site broke".
+STALE_BROWSER_DAYS = 180
+
+
+def _browser_build() -> tuple[str | None, int | None]:
+    """(version, age_in_days) of the browser that will actually launch.
+
+    Both come from the same application.ini next to the binary launch_path()
+    resolves to, so the version we name can never disagree with the age we
+    measured. BuildID (YYYYMMDDHHMMSS) is the build date, not the download date.
+    """
+    from datetime import datetime
+    version = age = None
+    try:
+        from camoufox.pkgman import launch_path
+        from pathlib import Path
+        ini = Path(launch_path()).parent / "application.ini"
+        for line in ini.read_text(errors="replace").splitlines():
+            if line.startswith("Version="):
+                version = line.split("=", 1)[1].strip()
+            elif line.startswith("BuildID="):
+                stamp = line.split("=", 1)[1].strip()[:8]
+                age = (datetime.now() - datetime.strptime(stamp, "%Y%m%d")).days
+    except Exception:
+        pass
+    return version, age
+
+
+def browser_age_days() -> int | None:
+    """Age of the installed browser build in days, or None if undeterminable."""
+    return _browser_build()[1]
+
+
+def browser_staleness_warning() -> str | None:
+    """A line to show the user when the installed browser is too old to pass
+    Cloudflare, or None when it looks current."""
+    ver, age = _browser_build()
+    if age is None or age < STALE_BROWSER_DAYS:
+        return None
+    return (f"Stealth browser {ver or 'unknown'} is {age} days old — Cloudflare will likely "
+            "refuse to issue a challenge token to a build this stale, and every "
+            "resolve will fail. Run: camoufox sync && camoufox fetch")
+
+
 def ensure_browser(status_cb=None) -> None:
     """Download + install the Camoufox browser if missing or outdated.
 

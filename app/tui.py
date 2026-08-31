@@ -24,7 +24,7 @@ if __package__ in (None, ""):
     import sys
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
     from app import config as config_mod
-    from app.bootstrap import browser_ready, ensure_browser
+    from app.bootstrap import browser_ready, ensure_browser, browser_staleness_warning
     from app.downloader import Downloader, Aria2NotFound, Aria2RpcError
     from app.resolver import (
         Resolver, valid_url, filename_from_fragment,
@@ -39,7 +39,7 @@ if __package__ in (None, ""):
     from app.state import DownloadState
 else:
     from . import config as config_mod
-    from .bootstrap import browser_ready, ensure_browser
+    from .bootstrap import browser_ready, ensure_browser, browser_staleness_warning
     from .downloader import Downloader, Aria2NotFound, Aria2RpcError
     from .resolver import (
         Resolver, valid_url, filename_from_fragment,
@@ -199,6 +199,11 @@ class FitFastTUI(App):
         if not browser_ready():
             self._log("Stealth browser not installed. Press 'i' to install it "
                       "(one-time, a few hundred MB) before fetching.")
+        else:
+            stale = browser_staleness_warning()
+            if stale:
+                self._log(stale)
+                get_logger().warning(stale)
         if find_unrar() is None:
             self._log("Note: no unar/unrar found — downloads work but auto-extract is off. "
                       "Install 'unar' to enable it.")

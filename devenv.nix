@@ -2,6 +2,7 @@
 
 # Dev environment for the FitFast terminal UI on Linux / NixOS.
 #   devenv shell          # enter the environment
+#   camoufox sync         # refresh the version list (see note below)
 #   camoufox fetch        # one-time: download the stealth browser
 #   python fitfast_tui.py # launch the TUI
 #
@@ -30,6 +31,10 @@ in
 
   languages.python = {
     enable = true;
+    # tkinter is a compiled stdlib extension (_tkinter.so); on nixpkgs it lives
+    # in a separate output, so the interpreter has to be built with it or
+    # `import turtle` / `import tkinter` fails with ModuleNotFoundError.
+    package = pkgs.python3.withPackages (ps: [ ps.tkinter ]);
     venv = {
       enable = true;
       requirements = ''
@@ -58,7 +63,8 @@ in
 
   enterShell = ''
     echo "FitFast — terminal edition"
-    echo "  first run only:  camoufox fetch      # downloads the stealth browser (~a few hundred MB)"
+    echo "  first run only:  camoufox sync && camoufox fetch   # version list + stealth browser (~1GB)"
+    echo "  if resolves fail:  camoufox sync && camoufox fetch  # a stale version list pins you to an old Firefox"
     echo "  launch:          python fitfast_tui.py"
     echo ""
     aria2c --version | head -n1

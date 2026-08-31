@@ -35,7 +35,8 @@ You need **Python 3.11+**, **aria2c**, and **unar** (or `unrar`) on `PATH`.
 
 ```sh
 devenv shell        # python + aria2 + unar + the libs
-camoufox fetch      # ONE TIME: downloads the stealth browser (a few hundred MB)
+camoufox sync       # refresh the available-version list FIRST (see below)
+camoufox fetch      # ONE TIME: downloads the stealth browser (~1GB)
 python fitfast_tui.py
 ```
 
@@ -49,6 +50,7 @@ Or just `make tui`, which does the same in one step.
 python -m venv .venv && . .venv/bin/activate
 pip install -r requirements-tui.txt
 sudo apt install aria2 unar        # or your package manager's equivalent
+camoufox sync                      # refresh the version list first
 camoufox fetch                     # one-time stealth browser download
 python fitfast_tui.py
 ```

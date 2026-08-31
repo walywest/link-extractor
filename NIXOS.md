@@ -11,7 +11,8 @@ Windows binaries.
 
 ```sh
 devenv shell        # enters the env: python + aria2 + unar + the libs
-camoufox fetch      # ONE TIME: downloads the stealth browser (~a few hundred MB)
+camoufox sync       # refresh the available-version list FIRST (see below)
+camoufox fetch      # ONE TIME: downloads the stealth browser (~1GB)
 python fitfast_tui.py
 ```
 
