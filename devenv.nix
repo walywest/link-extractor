@@ -27,6 +27,7 @@ in
   packages = [
     pkgs.aria2   # multi-connection downloader FitFast shells out to
     pkgs.unar    # free RAR5 / multi-volume extractor for the auto-extract step
+    pkgs.ffmpeg-headless  # decode video recordings from the shell
   ];
 
   languages.python = {
