@@ -11,14 +11,6 @@ venv/
 devenv.lock
 .direnv/
 
-# PyInstaller build output
-build/
-dist/
-*.manifest
-
-# Installer compiler output
-installer_out/
-
 # JDownloader plugin prototype: auto-launched daemon's log
 jdownloader-plugin/resolver_daemon.log
 
@@ -29,8 +21,9 @@ docs/superpowers/
 .claude/
 
 # OS / editor
-Thumbs.db
-Desktop.ini
 .DS_Store
 .vscode/
 .idea/
+
+# Local test link (never commit)
+.secret-link

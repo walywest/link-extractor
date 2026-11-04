@@ -1,3 +1,7 @@
-camoufox[geoip]
-customtkinter>=5.2
+# Terminal UI (Linux / macOS). System tools `aria2c` and `unar` (or `unrar`)
+# must also be on PATH — see devenv.nix for the NixOS setup.
 requests>=2.31
+# Pinned: each camoufox release only accepts the one browser build it shipped
+# with, so an unpinned upgrade makes the installed browser "not installed".
+camoufox[geoip]==0.5.8
+textual>=0.60

@@ -5,9 +5,6 @@
 #   camoufox sync         # refresh the version list (see note below)
 #   camoufox fetch        # one-time: download the stealth browser
 #   python fitfast_tui.py # launch the TUI
-#
-# The Windows GUI (customtkinter + bundled .exe binaries) is NOT covered here —
-# this shell targets the cross-platform TUI in app/tui.py.
 
 let
   # Runtime libraries needed by the two dynamically-linked binaries FitFast
@@ -31,10 +28,6 @@ in
 
   languages.python = {
     enable = true;
-    # tkinter is a compiled stdlib extension (_tkinter.so); on nixpkgs it lives
-    # in a separate output, so the interpreter has to be built with it or
-    # `import turtle` / `import tkinter` fails with ModuleNotFoundError.
-    package = pkgs.python3.withPackages (ps: [ ps.tkinter ]);
     venv = {
       enable = true;
       requirements = ''

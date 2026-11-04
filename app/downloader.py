@@ -3,7 +3,7 @@
 Speed-tuned defaults (see design doc for reasoning):
   - ONE connection per file — see below; the CDN can't do multi-connection
   - up to N files downloading at once (parallelism comes from concurrent files)
-  - falloc for instant NTFS pre-allocation, prevents fragmentation
+  - falloc for instant pre-allocation, prevents fragmentation
   - 64 MB disk cache to batch writes
 
 Why one connection per file
@@ -21,34 +21,14 @@ answered correctly, so a single connection downloads and resumes reliably.
 Throughput is recovered by downloading several files concurrently instead.
 """
 from __future__ import annotations
-import io
 import os
 import shutil
 import socket
 import subprocess
 import time
-import urllib.request
-import zipfile
 from pathlib import Path
 
 import requests
-
-if __package__ in (None, ""):
-    from paths import VENDOR_DIR
-else:
-    from .paths import VENDOR_DIR
-
-# Windows ships a vendored aria2c.exe; every other platform uses the system
-# aria2c on PATH (installed via nix/apt/brew). The name has no .exe off Windows
-# so the vendored Windows binary is never picked up on Linux/macOS.
-_ARIA2_EXE = "aria2c.exe" if os.name == "nt" else "aria2c"
-ARIA2_PATH = VENDOR_DIR / _ARIA2_EXE
-
-ARIA2_RELEASE_URL = (
-    "https://github.com/aria2/aria2/releases/download/"
-    "release-1.37.0/aria2-1.37.0-win-64bit-build1.zip"
-)
-ARIA2_SHA256 = "67d015301eef0b612191212d564c5bb0a14b5b9c4796b76454276a4d28d9b288"
 
 # Fake a real Firefox UA so origin servers don't fingerprint aria2c
 DOWNLOAD_UA = (
@@ -72,40 +52,15 @@ def _find_free_port() -> int:
 
 
 def ensure_aria2c() -> Path:
-    """Return a runnable aria2c: vendored binary, then PATH, then (Windows) download."""
-    # 1. Vendored binary (the Windows release ships one next to the app).
-    if ARIA2_PATH.exists():
-        return ARIA2_PATH
-    # 2. System aria2c on PATH — the normal case on Linux/macOS/Nix.
-    found = shutil.which("aria2c") or shutil.which("aria2c.exe")
+    """Return the system aria2c on PATH (installed via nix/apt/brew)."""
+    found = shutil.which("aria2c")
     if found:
         return Path(found)
-    # 3. Only Windows can bootstrap itself by downloading the official build.
-    if os.name != "nt":
-        raise Aria2NotFound(
-            "aria2c not found. Install it with your package manager "
-            "(e.g. `nix profile install nixpkgs#aria2`, `apt install aria2`, "
-            "`brew install aria2`) so it's on your PATH."
-        )
-    VENDOR_DIR.mkdir(parents=True, exist_ok=True)
-    import hashlib
-
-    with urllib.request.urlopen(ARIA2_RELEASE_URL, timeout=120) as r:
-        data = r.read()
-    got = hashlib.sha256(data).hexdigest()
-    if got != ARIA2_SHA256:
-        raise Aria2NotFound(
-            f"aria2 zip hash mismatch (expected {ARIA2_SHA256}, got {got})"
-        )
-    with zipfile.ZipFile(io.BytesIO(data)) as z:
-        for name in z.namelist():
-            if name.endswith("aria2c.exe"):
-                with z.open(name) as src, open(ARIA2_PATH, "wb") as dst:
-                    dst.write(src.read())
-                break
-    if not ARIA2_PATH.exists():
-        raise Aria2NotFound("aria2c.exe not found in downloaded zip")
-    return ARIA2_PATH
+    raise Aria2NotFound(
+        "aria2c not found. Install it with your package manager "
+        "(e.g. `nix profile install nixpkgs#aria2`, `apt install aria2`, "
+        "`brew install aria2`) so it's on your PATH."
+    )
 
 
 class Downloader:
@@ -168,14 +123,10 @@ class Downloader:
             "--connect-timeout=15",
             "--timeout=60",
         ]
-        creation = 0
-        if os.name == "nt":
-            creation = getattr(subprocess, "CREATE_NO_WINDOW", 0)
         self.proc = subprocess.Popen(
             args,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
-            creationflags=creation,
         )
         deadline = time.time() + 10
         last_err: Exception | None = None

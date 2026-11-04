@@ -47,42 +47,23 @@ class ResolveTimeout(Exception):
 
 def _worker_argv(url: str) -> list[str]:
     """Command that resolves one URL and prints JSON on stdout."""
-    if getattr(sys, "frozen", False):
-        # In a PyInstaller build sys.executable *is* the app, so re-enter it
-        # through the flag handled in the entry point.
-        return [sys.executable, "--resolve-one", url]
     return [sys.executable, "-m", "app.resolve_proc", url]
 
 
 def _popen_kwargs() -> dict:
-    """Detach the child so we can kill its whole tree, without a console flash."""
-    kw: dict = {}
-    if os.name == "nt":
-        kw["creationflags"] = (
-            getattr(subprocess, "CREATE_NO_WINDOW", 0)
-            | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
-        )
-    else:
-        kw["start_new_session"] = True
-    return kw
+    """Detach the child into its own session so we can kill its whole tree."""
+    return {"start_new_session": True}
 
 
 def _kill_tree(proc: subprocess.Popen) -> None:
     """Kill the worker *and* any browser it spawned."""
-    if os.name == "nt":
-        subprocess.run(
-            ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-        )
-    else:
+    try:
+        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+    except (ProcessLookupError, PermissionError, OSError):
         try:
-            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-        except (ProcessLookupError, PermissionError, OSError):
-            try:
-                proc.kill()
-            except OSError:
-                pass
+            proc.kill()
+        except OSError:
+            pass
     try:
         proc.wait(timeout=10)
     except Exception:

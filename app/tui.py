@@ -1,8 +1,7 @@
 """FitFast — terminal UI front-end (Linux / macOS / Nix friendly).
 
-Drives the same resolver / downloader / scraper / extractor backends as the
-Windows GUI, but through a Textual TUI so there is no Tkinter or Windows
-dependency. Paste a FitGirl page (or FuckingFast links), press Fetch, then
+Drives the resolver / downloader / scraper / extractor backends through a
+Textual TUI. Paste a FitGirl page (or FuckingFast links), press Fetch, then
 Start; downloads run through aria2c and are auto-extracted with unar/unrar.
 
 Keys:  f Fetch · s Start · p Pause/Resume · c Cancel · i Install browser ·
@@ -24,7 +23,7 @@ if __package__ in (None, ""):
     import sys
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
     from app import config as config_mod
-    from app.bootstrap import browser_ready, ensure_browser, browser_staleness_warning
+    from app.bootstrap import browser_ready, install_in_subprocess, browser_staleness_warning
     from app.downloader import Downloader, Aria2NotFound, Aria2RpcError
     from app.resolver import (
         Resolver, valid_url, filename_from_fragment,
@@ -39,7 +38,7 @@ if __package__ in (None, ""):
     from app.state import DownloadState
 else:
     from . import config as config_mod
-    from .bootstrap import browser_ready, ensure_browser, browser_staleness_warning
+    from .bootstrap import browser_ready, install_in_subprocess, browser_staleness_warning
     from .downloader import Downloader, Aria2NotFound, Aria2RpcError
     from .resolver import (
         Resolver, valid_url, filename_from_fragment,
@@ -197,8 +196,8 @@ class FitFastTUI(App):
         self.set_interval(0.5, self._poll)
         self._log("Ready. Paste a FitGirl page or FuckingFast links, then Fetch / Start.")
         if not browser_ready():
-            self._log("Stealth browser not installed. Press 'i' to install it "
-                      "(one-time, a few hundred MB) before fetching.")
+            self._log("Stealth browser not installed (or not the build this camoufox "
+                      "version needs). Press 'i' to install it (one-time, ~1.2 GB).")
         else:
             stale = browser_staleness_warning()
             if stale:
@@ -294,13 +293,13 @@ class FitFastTUI(App):
         if browser_ready():
             self._log("Stealth browser already installed.")
             return
-        self._log("Installing stealth browser… this downloads a few hundred MB once.")
+        self._log("Installing stealth browser… one-time download of ~1.2 GB.")
         self._setup_thread = threading.Thread(target=self._install_worker, daemon=True)
         self._setup_thread.start()
 
     def _install_worker(self) -> None:
         try:
-            ensure_browser(lambda m: self.call_from_thread(self._log, m))
+            install_in_subprocess(lambda m: self.call_from_thread(self._log, m))
             self.call_from_thread(self._log, "Browser ready. You can Fetch now.")
         except Exception as e:
             tb = log_exception("installing the stealth browser", e)

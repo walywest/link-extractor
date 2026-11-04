@@ -1,11 +1,8 @@
 # FitFast on Linux / NixOS (terminal edition)
 
-The Windows GUI (`fitfast.py`) bundles Windows `.exe` binaries and a Tkinter
-UI. On Linux there's a **terminal UI** instead — `fitfast_tui.py` — that drives
-the same resolver / downloader / scraper / extractor backends through
+FitFast is a **terminal UI** — `fitfast_tui.py` — built on
 [Textual](https://textual.textualize.io/). It shells out to the system
-`aria2c` (downloads) and `unar`/`unrar` (extraction) rather than the vendored
-Windows binaries.
+`aria2c` (downloads) and `unar`/`unrar` (extraction).
 
 ## Quick start with devenv
 
@@ -57,7 +54,7 @@ the missing piece.
 
 ```sh
 python -m venv .venv && . .venv/bin/activate
-pip install -r requirements-tui.txt
+pip install -r requirements.txt
 # ensure aria2c and unar (or unrar) are on PATH, e.g. apt install aria2 unar
 camoufox fetch
 python fitfast_tui.py

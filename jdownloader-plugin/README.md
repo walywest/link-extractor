@@ -1,7 +1,7 @@
 # FitFast for JDownloader (prototype)
 
 A spike proving that FitFast's Cloudflare bypass can feed **JDownloader**
-instead of (or alongside) the TUI/GUI — so you get JD's mature download
+instead of (or alongside) the TUI — so you get JD's mature download
 manager (pause/resume, queueing, its own UI) while still getting past
 fuckingfast.co's Cloudflare wall, which JDownloader cannot do on its own.
 
@@ -25,10 +25,10 @@ to pass the check once per session.
 So the work splits in two, matching how the rest of this project is built:
 
 - **Pass Cloudflare** (do this once, keep the trust) — Camoufox, the same
-  stealth browser the TUI/GUI use, resolves a fuckingfast.co page into a
+  stealth browser the TUI use, resolves a fuckingfast.co page into a
   pre-signed, cookie-free `dl.fuckingfast.co` URL.
 - **Move the bytes fast** (do this per file, at volume) — hand that signed
-  URL to a download engine built for throughput. For the TUI/GUI that's
+  URL to a download engine built for throughput. For the TUI that's
   aria2c; here, it's JDownloader itself.
 
 A FitGirl repack is ~150–250 part links, so resolving is not a one-shot
@@ -50,7 +50,7 @@ JDownloader  --HTTP GET /resolve?url=...-->  resolver_daemon.py (Camoufox, one b
 
 ```sh
 # from the repo root, inside the devenv shell (or any env with the TUI's
-# requirements-tui.txt installed + camoufox fetch already done)
+# requirements.txt installed + camoufox fetch already done)
 python jdownloader-plugin/resolver_daemon.py            # default port 8765
 python jdownloader-plugin/resolver_daemon.py --port 9000 # custom port
 ```

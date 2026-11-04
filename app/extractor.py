@@ -1,9 +1,8 @@
-"""Post-download RAR extraction via the bundled UnRAR.exe.
+"""Post-download RAR extraction via a system unrar / rar / unar.
 
 FitGirl repacks arrive as multi-volume RAR sets (``*.part01.rar`` …). Pointing
-UnRAR at the first volume automatically joins the rest, so we just locate each
-first volume in the folder and extract it. Falls back to a system WinRAR/UnRAR
-install if the bundled binary is somehow missing.
+the extractor at the first volume automatically joins the rest, so we just
+locate each first volume in the folder and extract it.
 """
 from __future__ import annotations
 import os
@@ -14,13 +13,9 @@ import threading
 from pathlib import Path
 
 if __package__ in (None, ""):
-    from paths import VENDOR_DIR
     from log import get_logger
 else:
-    from .paths import VENDOR_DIR
     from .log import get_logger
-
-BUNDLED_UNRAR = VENDOR_DIR / "UnRAR.exe"
 
 # First volume of a multi-part set: part01 / part001 / part1 (with any digits
 # that reduce to 1). Also a plain single-volume .rar with no .partNN.
@@ -28,37 +23,19 @@ _FIRST_VOL_RE = re.compile(r"\.part0*1\.rar$", re.IGNORECASE)
 _ANY_PART_RE = re.compile(r"\.part\d+\.rar$", re.IGNORECASE)
 _PERCENT_RE = re.compile(rb"(\d{1,3})%")
 
-_SYSTEM_CANDIDATES = [
-    r"C:\Program Files\WinRAR\UnRAR.exe",
-    r"C:\Program Files\WinRAR\Rar.exe",
-    r"C:\Program Files (x86)\WinRAR\UnRAR.exe",
-    r"C:\Program Files (x86)\WinRAR\Rar.exe",
-]
-
 
 class ExtractError(Exception):
     pass
 
 
 def find_unrar() -> Path | None:
-    # Windows: prefer the vendored UnRAR.exe shipped with the app.
-    if os.name == "nt" and BUNDLED_UNRAR.exists():
-        return BUNDLED_UNRAR
-    # Any platform: a RAR extractor on PATH. `unrar`/`rar` take UnRAR-style
-    # args; `unar` (The Unarchiver, free, handles RAR5 + multi-volume) is the
-    # Nix/Linux-friendly fallback and is invoked with its own flags below.
+    # A RAR extractor on PATH. `unrar`/`rar` take UnRAR-style args; `unar`
+    # (The Unarchiver, free, handles RAR5 + multi-volume) is the Nix-friendly
+    # fallback and is invoked with its own flags below.
     for exe in ("unrar", "rar", "unar"):
         found = shutil.which(exe)
         if found:
             return Path(found)
-    # Windows WinRAR install locations.
-    for c in _SYSTEM_CANDIDATES:
-        p = Path(c)
-        if p.exists():
-            return p
-    # Last resort on Windows: the vendored binary even if it wasn't first.
-    if os.name == "nt" and BUNDLED_UNRAR.exists():
-        return BUNDLED_UNRAR
     return None
 
 
@@ -93,7 +70,7 @@ def extract_archive(
     unrar = unrar or find_unrar()
     if unrar is None:
         raise ExtractError(
-            "No UnRAR/WinRAR found. Install WinRAR or 7-Zip, or extract the "
+            "No unrar/unar found. Install `unar` (or `unrar`), or extract the "
             ".rar files manually."
         )
     archive = Path(archive)
@@ -109,12 +86,10 @@ def extract_archive(
         # UnRAR/RAR: x = extract with full paths, -o+ = overwrite, -y = assume
         # yes, trailing separator on dest tells it the target is a directory.
         args = [str(unrar), "x", "-o+", "-y", str(archive), str(dest_dir) + os.sep]
-    creation = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
     proc = subprocess.Popen(
         args,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
-        creationflags=creation,
     )
 
     # UnRAR prints "\b\b\b\b45%" style updates; read raw bytes and pull the

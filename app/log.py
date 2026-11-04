@@ -1,6 +1,6 @@
 """Logging + crash capture so users can report problems.
 
-Everything the app does of note goes to %APPDATA%/FitFast/logs/fitfast.log.
+Everything the app does of note goes to ~/.config/FitFast/logs/fitfast.log.
 When something breaks, we can point the user at that file (or show the tail in
 the error dialog) so they can paste it into a GitHub issue.
 """

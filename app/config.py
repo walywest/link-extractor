@@ -1,4 +1,4 @@
-"""Persistent settings stored in %APPDATA%/FitFast/config.json."""
+"""Persistent settings stored in ~/.config/FitFast/config.json."""
 from __future__ import annotations
 import json
 import os
@@ -10,7 +10,7 @@ REPO_URL = f"https://github.com/{GITHUB_REPO}"
 ISSUES_URL = f"{REPO_URL}/issues/new"
 RELEASES_URL = f"{REPO_URL}/releases/latest"
 
-APP_DIR = Path(os.environ.get("APPDATA", str(Path.home() / ".config"))) / "FitFast"
+APP_DIR = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "FitFast"
 CONFIG_FILE = APP_DIR / "config.json"
 LOG_DIR = APP_DIR / "logs"
 LOG_FILE = LOG_DIR / "fitfast.log"

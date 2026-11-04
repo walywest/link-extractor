@@ -40,8 +40,6 @@ class ScrapeTimeout(Exception):
 
 def _worker_argv(page_url: str) -> list[str]:
     """Command that scrapes one page and prints JSON on stdout."""
-    if getattr(sys, "frozen", False):
-        return [sys.executable, "--scrape-one", page_url]
     return [sys.executable, "-m", "app.scrape_proc", page_url]
 
 

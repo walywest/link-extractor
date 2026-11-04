@@ -1,6 +1,0 @@
-# Cross-platform terminal UI (Linux / macOS). The Windows GUI uses
-# requirements.txt instead. System tools `aria2c` and `unar` (or `unrar`)
-# must also be on PATH — see devenv.nix for the NixOS setup.
-requests>=2.31
-camoufox[geoip]
-textual>=0.60

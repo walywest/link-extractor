@@ -8,7 +8,7 @@
 ![UI](https://img.shields.io/badge/ui-Textual%20TUI-5a3fd6)
 ![License](https://img.shields.io/badge/license-MIT-green)
 
-> **This is a fork.** The original [FitFast Downloader](https://github.com/DEM9N101/FitFast-Downloader) by DEM9N101 is a Windows-only Tkinter app shipped as an `.exe` installer. This fork adds a **cross-platform terminal UI** and a long list of correctness fixes found by driving real 100+ part repacks to completion. See [What this fork adds](#what-this-fork-adds).
+> **This is a fork.** The original [FitFast Downloader](https://github.com/DEM9N101/FitFast-Downloader) by DEM9N101 is a Windows-only Tkinter app shipped as an `.exe` installer. This fork replaces it with a **terminal UI** and a long list of correctness fixes found by driving real 100+ part repacks to completion. See [What this fork adds](#what-this-fork-adds).
 
 ---
 
@@ -48,7 +48,7 @@ Or just `make tui`, which does the same in one step.
 
 ```sh
 python -m venv .venv && . .venv/bin/activate
-pip install -r requirements-tui.txt
+pip install -r requirements.txt
 sudo apt install aria2 unar        # or your package manager's equivalent
 camoufox sync                      # refresh the version list first
 camoufox fetch                     # one-time stealth browser download
@@ -103,10 +103,10 @@ Everything below is new relative to upstream `DEM9N101/FitFast-Downloader`. Most
 
 ### The terminal UI, and getting off Windows
 
-- **`app/tui.py` — a full Textual TUI** driving the same resolver / downloader / scraper / extractor backends as the Windows GUI, with no Tkinter and no vendored `.exe` dependency. Live per-file progress table, pause/cancel, auto-extract, batch totals in the header.
-- **Cross-platform backends.** `aria2c` now resolves from a vendored binary *or* the system `PATH` (only Windows self-downloads); the extractor finds `unrar`, `rar`, or **`unar`** — the free RAR5 / multi-volume extractor, which is what makes NixOS viable.
+- **`app/tui.py` — a full Textual TUI** replacing the upstream Windows Tkinter GUI, which has been removed along with its PyInstaller/Inno Setup packaging and vendored `.exe` binaries. Live per-file progress table, pause/cancel, auto-extract, batch totals in the header.
+- **System tools only.** `aria2c` comes from `PATH`; the extractor finds `unrar`, `rar`, or **`unar`** — the free RAR5 / multi-volume extractor, which is what makes NixOS viable.
 - **`devenv.nix` + `NIXOS.md`** — a reproducible dev shell with Python, aria2 and unar, plus the `NIX_LD_LIBRARY_PATH` / `LD_LIBRARY_PATH` wiring that lets Camoufox's prebuilt Firefox and Playwright's node driver actually launch on NixOS.
-- **`Makefile`** — `make tui` for the terminal UI, `make windows-run` to launch the Windows GUI on a Windows host from inside WSL.
+- **`Makefile`** — `make tui` to launch the terminal UI inside the dev shell.
 
 ### Review the queue before committing to it
 
@@ -129,15 +129,12 @@ Everything below is new relative to upstream `DEM9N101/FitFast-Downloader`. Most
 - **Cancel actually stops things.** `Cancel` used to pause downloads without closing aria2c or Camoufox, so every cancel→start cycle orphaned another aria2c *and* another browser in the background.
 - **Vanished-file detection.** Antivirus quarantining a completed archive used to look like success. It's now detected and reported by name.
 
-### Correctness fixes shared with the GUI
+### Correctness fixes over upstream
 
 - **Filenames come from the URL fragment, not the page title.** FuckingFast serves an identical `<title>` for every part of a repack, so all parts resolved to one colliding filename.
 - **Reliable link fetching.** Headless Camoufox intermittently crashes seconds after these ad-heavy pages load; links are now grabbed immediately after `domcontentloaded`, with spoiler-expansion as best-effort afterwards and a retry if the browser dies before the first grab.
-- **Real error messages.** The GUI's fetch error handler referenced an exception variable after its `except` block had deleted it, so every fetch failure crashed with `NameError` and masked the actual cause.
 - **Dropped the pre-flight `HEAD` check** upstream of aria2 — the signed URL is effectively single-use, and touching it first burned the token.
 - **Speed limit** (`--max-overall-download-limit`), adjustable live mid-download via aria2's RPC.
-
-> The upstream Windows GUI (`app/main.py`, `fitfast.py`) is still in the tree and receives these backend fixes, but this README documents the TUI only.
 
 ---
 
@@ -170,6 +167,6 @@ The software is provided as is, without warranty of any kind. Use it at your own
 
 ## License
 
-MIT, as upstream. Bundled and external tools keep their own licenses: [aria2](https://github.com/aria2/aria2) (GPLv2), [unar](https://theunarchiver.com/command-line) (LGPL), and UnRAR (see `vendor/UnRAR-license.txt`).
+MIT, as upstream. External tools keep their own licenses: [aria2](https://github.com/aria2/aria2) (GPLv2) and [unar](https://theunarchiver.com/command-line) (LGPL).
 
 Original work © DEM9N101 — [DEM9N101/FitFast-Downloader](https://github.com/DEM9N101/FitFast-Downloader).
