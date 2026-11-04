@@ -5,6 +5,8 @@
 #   camoufox sync         # refresh the version list (see note below)
 #   camoufox fetch        # one-time: download the stealth browser
 #   python fitfast_tui.py # launch the TUI
+#   python fitfast_web.py # or: the web UI that hands out direct links
+#   devenv up             # run the web UI as a managed process
 
 let
   # Runtime libraries needed by the two dynamically-linked binaries FitFast
@@ -51,11 +53,25 @@ in
   env.NIX_LD_LIBRARY_PATH = lib.makeLibraryPath runtimeLibs;
   env.LD_LIBRARY_PATH = lib.makeLibraryPath runtimeLibs;
 
+  # ── Web UI ────────────────────────────────────────────────────────────────
+  # Listens on all interfaces; port-forward FITFAST_WEB_PORT on your router.
+  # Password: PASS=... in the repo's gitignored .env (read by the app itself).
+  env.FITFAST_WEB_HOST = "0.0.0.0";
+  env.FITFAST_WEB_PORT = "8787";
+  env.FITFAST_WEB_FAST_PARALLEL = "4";  # concurrent browserless resolves (~0.3s each)
+  env.FITFAST_WEB_PARALLEL = "2";       # concurrent fallback browsers (~300-500MB RAM each)
+
+  # The app reads PASS from .env itself; don't export it into the whole shell.
+  dotenv.disableHint = true;
+
+  processes.web.exec = "python fitfast_web.py";
+
   enterShell = ''
     echo "FitFast — terminal edition"
     echo "  first run only:  camoufox sync && camoufox fetch   # version list + stealth browser (~1GB)"
     echo "  if resolves fail:  camoufox sync && camoufox fetch  # a stale version list pins you to an old Firefox"
-    echo "  launch:          python fitfast_tui.py"
+    echo "  launch:          python fitfast_tui.py      # terminal UI"
+    echo "  web UI:          python fitfast_web.py      # or: devenv up   (port $FITFAST_WEB_PORT)"
     echo ""
     aria2c --version | head -n1
     printf 'unar: '; unar -v 2>/dev/null | head -n1 || echo '(not found)'

@@ -27,3 +27,6 @@ docs/superpowers/
 
 # Local test link (never commit)
 .secret-link
+
+# Local secrets (web UI password: PASS=...)
+.env

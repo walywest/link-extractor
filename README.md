@@ -95,6 +95,10 @@ Single-letter keys fire when focus isn't inside a text box — otherwise Tab to 
 | **Delete archives after extract** | Removes the `.rar` files after a *successful* extraction, to reclaim space. |
 | **Speed limit MB/s (0=∞)** | Caps total download speed across all files. Type a new value and press Enter to apply it **live**, mid-download. |
 
+### Web UI (share it with someone)
+
+`python fitfast_web.py` (or `make web`) serves a password-protected page that turns a FitGirl page into direct, Cloudflare-free download links for someone else to paste into JDownloader or any download manager. It resolves links and downloads nothing. See [WEB.md](WEB.md).
+
 ---
 
 ## What this fork adds
