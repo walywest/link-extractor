@@ -6,6 +6,7 @@ so scraping is just: load the page past Cloudflare, grab every fuckingfast.co
 anchor, natural-sort by part number, dedupe.
 """
 from __future__ import annotations
+import html
 import re
 
 from camoufox.sync_api import Camoufox
@@ -124,6 +125,62 @@ def _scrape_once(page_url: str, timeout_ms: int) -> tuple[list[str], str | None]
         if not links:
             raise
     return links, title
+
+
+_ANCHOR_RE = re.compile(r"""href\s*=\s*["'](https?://fuckingfast\.co/[^"'\s>]+)["']""",
+                        re.IGNORECASE)
+_H1_RE = re.compile(r'<h1[^>]*class="[^"]*entry-title[^"]*"[^>]*>(.*?)</h1>',
+                    re.IGNORECASE | re.DOTALL)
+_TITLE_RE = re.compile(r"<title[^>]*>(.*?)</title>", re.IGNORECASE | re.DOTALL)
+_TAG_RE = re.compile(r"<[^>]+>")
+
+
+def _html_text(fragment: str) -> str:
+    return html.unescape(_TAG_RE.sub("", fragment)).strip()
+
+
+def fast_scrape(page_url: str, timeout: float = 30.0) -> ScrapeResult:
+    """Scrape without a browser. The part links are static anchors (spoiler
+    sections are only hidden with CSS), so one Chrome-TLS GET is enough when
+    Cloudflare isn't challenging. Raises ScrapeError; callers fall back to the
+    browser scrape."""
+    from .resolver import http_session
+
+    page_url = page_url.strip()
+    if not is_fitgirl_url(page_url):
+        raise ScrapeError("Not a fitgirl-repacks.site URL")
+    try:
+        r = http_session().get(page_url, timeout=timeout)
+    except Exception as e:
+        raise ScrapeError(f"fast scrape: {type(e).__name__}: {e}") from e
+    if r.status_code != 200 or r.headers.get("cf-mitigated"):
+        raise ScrapeError(f"fast scrape: HTTP {r.status_code}")
+    text = r.text or ""
+    links: list[str] = []
+    seen: set[str] = set()
+    for raw in _ANCHOR_RE.findall(text):
+        h = html.unescape(raw)
+        m = FF_HREF_RE.match(h)
+        if not m:
+            continue
+        key = m.group(0)
+        if key in seen:
+            continue
+        seen.add(key)
+        links.append(h if "#" in h else key)
+    if not links:
+        raise ScrapeError(
+            "No FuckingFast links found on that page. Make sure it's a game "
+            "repack page (not the homepage or an 'upcoming' post).")
+    links.sort(key=_base_and_part)
+    title = None
+    for rx in (_H1_RE, _TITLE_RE):
+        mt = rx.search(text)
+        if mt:
+            title = _clean_title(_html_text(mt.group(1)))
+            if title:
+                break
+    return ScrapeResult(links, title)
 
 
 def scrape_fitgirl_page(page_url: str, timeout_ms: int = 60_000,

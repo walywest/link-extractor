@@ -59,15 +59,24 @@ class SubprocessScraper:
         if proc is not None and proc.poll() is None:
             _kill_tree(proc)
 
-    def scrape(self, page_url: str):
-        """Return a ScrapeResult. Raises ScrapeError-compatible errors."""
+    def scrape(self, page_url: str, fast: bool = True):
+        """Return a ScrapeResult. Raises ScrapeError-compatible errors.
+
+        With ``fast`` (the default) a browserless fetch is tried first; the
+        browser subprocess only runs if that fails.
+        """
         if __package__ in (None, ""):
-            from app.scraper import ScrapeError, ScrapeResult
+            from app.scraper import ScrapeError, ScrapeResult, fast_scrape
         else:
-            from .scraper import ScrapeError, ScrapeResult
+            from .scraper import ScrapeError, ScrapeResult, fast_scrape
 
         if self._closed:
             raise ScrapeError("scraper has been closed")
+        if fast:
+            try:
+                return fast_scrape(page_url)
+            except ScrapeError:
+                pass  # fall through to the browser
 
         proc = subprocess.Popen(
             _worker_argv(page_url),

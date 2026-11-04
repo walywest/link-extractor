@@ -90,12 +90,24 @@ class SubprocessResolver:
         if proc is not None and proc.poll() is None:
             _kill_tree(proc)
 
-    def resolve(self, url: str, retries: int = 1) -> tuple[str, str]:
-        """Return (signed_url, filename). Raises ResolveError-compatible errors."""
-        from .resolver import ResolveError  # local import: keeps module light
+    def resolve(self, url: str, retries: int = 1, fast: bool = True) -> tuple[str, str]:
+        """Return (signed_url, filename). Raises ResolveError-compatible errors.
+
+        With ``fast`` (the default) a browserless HTTP resolve is tried first;
+        the browser subprocess only runs if that fails for a reason it might
+        get past (a dead file fails straight away).
+        """
+        from .resolver import DeadLinkError, ResolveError, fast_resolve
 
         if self._closed:
             raise ResolveError("resolver has been closed")
+        if fast:
+            try:
+                return fast_resolve(url)
+            except DeadLinkError:
+                raise
+            except ResolveError:
+                pass  # fall through to the browser
 
         last = "unknown error"
         for _attempt in range(retries + 1):

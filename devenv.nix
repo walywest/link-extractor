@@ -30,11 +30,8 @@ in
     enable = true;
     venv = {
       enable = true;
-      requirements = ''
-        requests>=2.31
-        camoufox[geoip]
-        textual>=0.60
-      '';
+      # Single source of truth, so the camoufox pin there applies here too.
+      requirements = builtins.readFile ./requirements.txt;
     };
   };
 

@@ -36,6 +36,64 @@ class ResolveError(Exception):
     pass
 
 
+class DeadLinkError(ResolveError):
+    """The file is gone (404) — no point trying the browser either."""
+
+
+# ── Fast path: no browser ────────────────────────────────────────────────────
+# The DOWNLOAD button is only an HTMX POST to /f/<id>/go, and the signed URL
+# comes back in its `hx-redirect` header. Cloudflare gates that endpoint on the
+# TLS fingerprint, not on Turnstile, so a Chrome-impersonating client
+# (curl_cffi) gets the answer directly in ~0.3s instead of the 10-30s a browser
+# launch + Turnstile wait costs. Measured live 2026-11-04. When the site does
+# demand a captcha ("captcha verification failed"), or anything else is off,
+# callers fall back to the Camoufox Resolver below.
+FF_HOST = "https://fuckingfast.co"
+_FF_ID_RE = re.compile(r"^https?://fuckingfast\.co/([A-Za-z0-9]+)", re.IGNORECASE)
+_tls = threading.local()
+
+
+def http_session():
+    """Per-thread curl_cffi session (sessions are not thread-safe)."""
+    s = getattr(_tls, "session", None)
+    if s is None:
+        from curl_cffi import requests as cf_requests
+        s = cf_requests.Session(impersonate="chrome")
+        _tls.session = s
+    return s
+
+
+def fast_resolve(url: str, timeout: float = 20.0) -> tuple[str, str]:
+    """Return (signed_url, filename) without a browser.
+
+    Raises DeadLinkError for a removed file, ResolveError for anything the
+    browser path might still get past.
+    """
+    m = _FF_ID_RE.match(url.strip())
+    if not m:
+        raise ResolveError("not a fuckingfast.co link")
+    file_id = m.group(1)
+    page = f"{FF_HOST}/{file_id}"
+    try:
+        r = http_session().post(
+            f"{FF_HOST}/f/{file_id}/go", data=b"", allow_redirects=False,
+            timeout=timeout, headers={
+                "Accept": "*/*", "HX-Request": "true", "HX-Current-URL": page,
+                "Origin": FF_HOST, "Referer": page, "Sec-Fetch-Dest": "empty",
+                "Sec-Fetch-Mode": "cors", "Sec-Fetch-Site": "same-origin"})
+    except Exception as e:
+        raise ResolveError(f"fast resolve: {type(e).__name__}: {e}") from e
+    hx = r.headers.get("hx-redirect")
+    if hx and "/dl/" in hx:
+        return hx.strip(), Resolver._pick_filename(url, "")
+    body = (r.text or "")[:400].lower()
+    if r.status_code == 404 or "not found" in body:
+        raise DeadLinkError("file not found on fuckingfast.co (removed?)")
+    if "captcha" in body:
+        raise ResolveError("fast resolve: captcha required")
+    raise ResolveError(f"fast resolve: HTTP {r.status_code}, no hx-redirect")
+
+
 def valid_url(line: str) -> bool:
     return bool(LINK_RE.match(line.strip()))
 

@@ -5,3 +5,6 @@ requests>=2.31
 # with, so an unpinned upgrade makes the installed browser "not installed".
 camoufox[geoip]==0.5.8
 textual>=0.60
+# Chrome-TLS-impersonating HTTP client: resolves links without a browser
+# (Cloudflare fingerprints the TLS handshake, which plain requests fails).
+curl_cffi>=0.7
